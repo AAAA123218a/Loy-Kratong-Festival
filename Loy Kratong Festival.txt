@@ -1,13 +1,10 @@
 --[[
-    Loy Kratong Festival - Client-Side Joyful Festival Script
+    Loy Kratong Festival - Global Roblox Invite Menu & Spotlight Dance
     ทำงานเฉพาะฝั่ง Client (เห็นคนเดียวในหน้าจอเรา ไม่กระทบเซิร์ฟเวอร์)
-    1. โหลดเพลงประกอบเตรียมไว้ล่วงหน้า และเริ่มเล่นวนซ้ำทันทีเมื่อกดปุ่มเปิด (หยุดทันทีเมื่อกดปิด)
-    2. ไม่มีการตาย ทุกคนมีเลือดเต็ม 100% ยืนเรียงแถวหน้ากระดานแถวเดียวกับเรา (รองรับทั้ง R6 และ R15)
-    3. ซิงค์ความยาวอนิเมชั่นตามความยาวจริงของเพลง (Sound.TimeLength) และวนซ้ำต่อเนื่อง:
-       - ช่วงแรก (0%–35%): รำวงโยกตัวสนุกๆ พร้อมถือกระทงตั้งตรง + โคมลอยกลางฟ้า
-       - ช่วงกลาง (35%–60%): ตัวเราก้มอธิษฐานปล่อยกระทงลงน้ำ -> อีก 2 วิทุกคนปล่อยพร้อมกัน
-       - ช่วงหลัง (60%–90%): เต้นรำวงโบกมือฉลองวันลอยกระทงริมทะเลอย่างสนุกสนาน
-       - ช่วงท้าย (90%–100%): เสกกระทงรอบส่งท้ายลอยออกทะเล แล้ววนซ้ำรอบใหม่พร้อมเพลง
+    1. เมนูเปิด-ปิดมีอนิเมชั่น (Tween) ใส่ชื่อใครก็ได้ในโลก Roblox ไม่จำกัดจำนวน (100 - 1,000+ คน)
+    2. ปุ่มสีเขียวดึงอวาต้า ("ดึงแล้ว") + ปุ่มบวกสีฟ้า ("+") เพิ่มช่องใส่ชื่อ + ปุ่ม "รันทันที" พับเมนูเก็บอัตโนมัติ
+    3. บังคับตัวละครทุกคนยืนตรงและสูงเท่ากัน (R15 Uniform Normalization) ไม่มีตัวจมพื้นหรือบั๊ก
+    4. เปิดปุ๊บ เพลงมา + ทะเลขึ้น รอ 3 วิ -> ลอยกระทงทันที -> กล้องวนหาทีละคนคนละ 3 วิ เต้นสุ่มหลายท่าเต็มตัว -> วนซ้ำ!
 ]]
 
 local Players = game:GetService("Players")
@@ -20,25 +17,26 @@ local SoundService = game:GetService("SoundService")
 local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
-    LineupSpacing = 4.5,
-    FallbackCycleSec = 42,
-    GroupFollowDelaySec = 2,
-    OceanWidth = 320,
+    LineupSpacing = 4.8,
+    PreFloatWaitSec = 3,
+    SpotlightPerPersonSec = 3,
+    DanceEnergy = 1.15,
+    UniformHeight = true,
+    AutoCollapseOnRun = true,
+    OceanWidth = 340,
     OceanLength = 220,
-    DanceEnergy = 1,
     EnableSkyLanterns = true,
     FreezeLocalPlayer = true,
     GiveSelfKrathong = true,
-    HideRealPlayers = true,
     EnableCinematicCamera = true,
     EnableMusic = true,
     MusicUrl = "https://github.com/objwghd-maker/Loy-Kratong-Festival/raw/refs/heads/main/s4umusic--424040.mp3",
     MusicVolume = 0.75,
-    SoloFallbackClones = 5,
-    ButtonSizePx = 54,
+    ButtonSizePx = 46,
+    InitialUsernames = {  },
 }
 
-local GUI_NAME = "LoyKratongFestival_ToggleGui"
+local GUI_NAME = "LoyKratongFestival_MenuGui"
 local FOLDER_NAME = "__LoyKratongFestival_Client"
 local MUSIC_FILE = "LoyKratongFestival_BGM.mp3"
 
@@ -69,24 +67,30 @@ if oldFolder then
     oldFolder:Destroy()
 end
 
-local isEnabled = false
+-- สถานะระบบหลัก
+local isRunning = false
+local isMenuOpen = true
 local sessionToken = 0
 local illusionFolder = nil
-local hideConnection = nil
 local freezeConnection = nil
 local cameraConnection = nil
-local savedDisplayTypes = {}
 local savedPlayerState = nil
 local savedCameraState = nil
 local savedSelfMotors = {}
-local cachedHealthyAppearances = {}
 local activeSelfKrathongModel = nil
 local activeSound = nil
 local cachedAudioAsset = nil
-local currentCamPhase = "act1_ramwong_krathong"
+
+-- สถานะกล้อง
+local currentCamMode = "wide_row"
 local currentCamAnchor = CFrame.identity
-local currentLineupCount = 4
-local camPhaseClock = 0
+local currentSpotlightTarget = nil
+local currentRowCount = 1
+local camClock = 0
+
+-- รายชื่อแถวในเมนู (รองรับเป็นร้อยเป็นพันคน)
+local inviteRows = {} -- { rowId, frame, nameBox, pullBtn, status, pulledData }
+local nextRowId = 0
 
 local function ensureIllusionFolder()
     if illusionFolder and illusionFolder.Parent then
@@ -100,7 +104,7 @@ local function ensureIllusionFolder()
 end
 
 -- =========================================================
--- ระบบโหลดเพลงเตรียมไว้ล่วงหน้า & เล่นวนซ้ำทันทีตอนกดเปิด
+-- ระบบโหลดเพลงเตรียมไว้ล่วงหน้า & เล่นวนซ้ำทันทีตอนกดรัน
 -- =========================================================
 local function resolveAudioAsset()
     if cachedAudioAsset then
@@ -137,7 +141,6 @@ local function resolveAudioAsset()
     return nil
 end
 
--- โหลดเพลงรอไว้ตั้งแต่รันสคริปต์ (ยังไม่เล่นจนกว่าจะกดเปิด)
 task.spawn(function()
     if CONFIG.EnableMusic then
         resolveAudioAsset()
@@ -169,7 +172,7 @@ local function startBackgroundMusic(currentToken)
 
     task.spawn(function()
         local assetId = resolveAudioAsset()
-        if not assetId or not isEnabled or sessionToken ~= currentToken or activeSound ~= sound then
+        if not assetId or not isRunning or sessionToken ~= currentToken or activeSound ~= sound then
             return
         end
         sound.SoundId = assetId
@@ -181,127 +184,120 @@ local function startBackgroundMusic(currentToken)
     return sound
 end
 
-local function getSyncedSongDuration()
-    if activeSound and activeSound.Parent and activeSound.TimeLength and activeSound.TimeLength > 2 then
-        return activeSound.TimeLength
-    end
-    return CONFIG.FallbackCycleSec
-end
-
 -- =========================================================
--- ระบบมุมกล้องถ่ายคลิปอัตโนมัติตามจังหวะงานลอยกระทง
+-- ระบบดึงอวาต้าจากชื่อบัญชี Roblox ทั่วโลก + บังคับยืนตรงสูงเท่ากัน
 -- =========================================================
-local function setCameraStage(phaseName, anchorCf, lineupCount)
-    if currentCamPhase ~= phaseName then
-        camPhaseClock = 0
-    end
-    currentCamPhase = phaseName
-    if anchorCf then
-        currentCamAnchor = anchorCf
-    end
-    if lineupCount then
-        currentLineupCount = lineupCount
-    end
-end
-
-local function setCinematicCameraEnabled(enabled)
-    if cameraConnection then
-        cameraConnection:Disconnect()
-        cameraConnection = nil
+local function fetchRobloxUserAvatar(username)
+    local trimmed = username:match("^%s*(.-)%s*$")
+    if not trimmed or trimmed == "" then
+        return nil, "กรุณาใส่ชื่อ"
     end
 
-    local cam = Workspace.CurrentCamera
-    if not cam then
-        return
-    end
-
-    if not enabled then
-        if savedCameraState then
-            cam.CameraType = savedCameraState.CameraType
-            cam.FieldOfView = savedCameraState.FieldOfView
-            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-            cam.CameraSubject = hum or savedCameraState.CameraSubject
-            savedCameraState = nil
-        else
-            cam.CameraType = Enum.CameraType.Custom
-        end
-        return
-    end
-
-    if not CONFIG.EnableCinematicCamera then
-        return
-    end
-
-    if not savedCameraState then
-        savedCameraState = {
-            CameraType = cam.CameraType,
-            CameraSubject = cam.CameraSubject,
-            FieldOfView = cam.FieldOfView,
-        }
-    end
-
-    cam.CameraType = Enum.CameraType.Scriptable
-
-    cameraConnection = RunService.RenderStepped:Connect(function(dt)
-        if not isEnabled or not CONFIG.EnableCinematicCamera then
-            return
-        end
-        local activeCam = Workspace.CurrentCamera
-        if not activeCam then
-            return
-        end
-        if activeCam.CameraType ~= Enum.CameraType.Scriptable then
-            activeCam.CameraType = Enum.CameraType.Scriptable
-        end
-
-        camPhaseClock = camPhaseClock + dt
-        local baseCf = currentCamAnchor
-        local halfSpan = math.max(1, math.ceil(currentLineupCount / 2)) * CONFIG.LineupSpacing
-        local targetCf = activeCam.CFrame
-        local targetFov = 60
-
-        if currentCamPhase == "act1_ramwong_krathong" then
-            local panX = math.sin(camPhaseClock * 0.45) * math.min(9, halfSpan * 0.6)
-            local distZ = math.max(18, 12 + halfSpan * 0.85)
-            local camPos = (baseCf * CFrame.new(panX, 5.8, -distZ)).Position
-            local lookAt = (baseCf * CFrame.new(0, 2.2, 0)).Position
-            targetCf = CFrame.lookAt(camPos, lookAt)
-            targetFov = 58
-        elseif currentCamPhase == "act2_self_release" then
-            local camPos = (baseCf * CFrame.new(-3.4, 3.0, -7.2)).Position
-            local lookAt = (baseCf * CFrame.new(0, 1.3, -1.4)).Position
-            targetCf = CFrame.lookAt(camPos, lookAt)
-            targetFov = 50
-        elseif currentCamPhase == "act2_group_release" then
-            local distZ = math.max(22, 16 + halfSpan * 0.9)
-            local camPos = (baseCf * CFrame.new(math.sin(camPhaseClock * 0.4) * 3.5, 8.2, -distZ)).Position
-            local lookAt = (baseCf * CFrame.new(0, 1.4, -5.0)).Position
-            targetCf = CFrame.lookAt(camPos, lookAt)
-            targetFov = 63
-        elseif currentCamPhase == "act3_celebration_dance" then
-            local orbitX = math.sin(camPhaseClock * 0.38) * math.min(13, halfSpan * 0.85 + 4)
-            local distZ = math.max(20, 14 + halfSpan * 0.85)
-            local heightY = 6.2 + math.sin(camPhaseClock * 0.5) * 1.4
-            local camPos = (baseCf * CFrame.new(orbitX, heightY, -distZ)).Position
-            local lookAt = (baseCf * CFrame.new(0, 2.2, -2.5)).Position
-            targetCf = CFrame.lookAt(camPos, lookAt)
-            targetFov = 64
-        elseif currentCamPhase == "act4_finale_wave" then
-            local distZ = math.max(26, 18 + halfSpan * 0.95)
-            local camPos = (baseCf * CFrame.new(0, 10.5, -distZ)).Position
-            local lookAt = (baseCf * CFrame.new(0, 2.6, -8.0)).Position
-            targetCf = CFrame.lookAt(camPos, lookAt)
-            targetFov = 66
-        end
-
-        local alpha = math.clamp(dt * 3.2, 0, 1)
-        activeCam.CFrame = activeCam.CFrame:Lerp(targetCf, alpha)
-        activeCam.FieldOfView = activeCam.FieldOfView + (targetFov - activeCam.FieldOfView) * alpha
+    local okId, userId = pcall(function()
+        return Players:GetUserIdFromNameAsync(trimmed)
     end)
+    if not okId or not userId then
+        return nil, "ไม่พบชื่อนี้"
+    end
+
+    local okName, exactName = pcall(function()
+        return Players:GetNameFromUserIdAsync(userId)
+    end)
+
+    local okDesc, desc = pcall(function()
+        return Players:GetHumanoidDescriptionFromUserId(userId)
+    end)
+    if not okDesc or not desc then
+        return nil, "ดึงชุดไม่สำเร็จ"
+    end
+
+    return {
+        username = (okName and exactName) or trimmed,
+        userId = userId,
+        description = desc,
+    }, nil
+end
+
+local function createNormalizedAvatarModel(entry, spawnPos, yawOnly, folder)
+    local model = nil
+
+    if entry.description then
+        local descClone = entry.description:Clone()
+        if CONFIG.UniformHeight then
+            -- บังคับให้ทุกคนตัวเท่ากันและยืนตรงไม่มีตัวเตี้ยจมพื้น
+            descClone.HeightScale = 1
+            descClone.WidthScale = 1
+            descClone.DepthScale = 1
+            descClone.HeadScale = 1
+            descClone.ProportionScale = 0
+            descClone.BodyTypeScale = 0
+        end
+
+        local okCreate, created = pcall(function()
+            return Players:CreateHumanoidModelFromDescription(descClone, Enum.HumanoidRigType.R15)
+        end)
+        if okCreate and created then
+            model = created
+        end
+    end
+
+    -- กรณีสำรองถ้าไม่สามารถเรียก CreateHumanoidModelFromDescription ได้
+    if not model and entry.fallbackChar then
+        local prevArch = entry.fallbackChar.Archivable
+        entry.fallbackChar.Archivable = true
+        model = entry.fallbackChar:Clone()
+        entry.fallbackChar.Archivable = prevArch
+    end
+
+    if not model then
+        return nil
+    end
+
+    model.Name = entry.username or "Guest"
+
+    for _, desc in ipairs(model:GetDescendants()) do
+        if desc:IsA("Script") or desc:IsA("LocalScript") or desc:IsA("Tool") then
+            desc:Destroy()
+        elseif desc:IsA("BasePart") then
+            desc.CanCollide = false
+            desc.Anchored = false
+            desc.AssemblyLinearVelocity = Vector3.zero
+            desc.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    if hum then
+        hum.DisplayName = entry.username or model.Name
+        hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
+        hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.DisplayWhenDamaged
+        hum.MaxHealth = 100
+        hum.Health = 100
+        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+    end
+
+    model.Parent = folder
+
+    if root and spawnPos then
+        local offsetFromFloor = 3.0
+        if hum and hum.RigType == Enum.HumanoidRigType.R6 then
+            local leg = model:FindFirstChild("Left Leg") or model:FindFirstChild("Right Leg")
+            offsetFromFloor = ((leg and leg.Size.Y) or 2.0) + (root.Size.Y * 0.5)
+        elseif hum then
+            local hip = (hum.HipHeight and hum.HipHeight > 0.1) and hum.HipHeight or 2.0
+            offsetFromFloor = hip + (root.Size.Y * 0.5)
+        end
+        local finalCf = CFrame.new(spawnPos.X, spawnPos.Y + offsetFromFloor, spawnPos.Z) * (yawOnly or CFrame.identity)
+        model:PivotTo(finalCf)
+        root.Anchored = true
+    end
+
+    return model
 end
 
 -- =========================================================
--- ระบบล็อกตัวเราให้อยู่กลางแถวหน้ากระดาน (คืนค่าปกติเมื่อกดปิด)
+-- ระบบล็อกตัวเราให้อยู่ตรงกลางแถวหน้ากระดาน
 -- =========================================================
 local function setLocalPlayerFrozen(freeze)
     if freezeConnection then
@@ -355,7 +351,7 @@ local function setLocalPlayerFrozen(freeze)
     end
 
     freezeConnection = RunService.Heartbeat:Connect(function()
-        if not isEnabled or not CONFIG.FreezeLocalPlayer then
+        if not isRunning or not CONFIG.FreezeLocalPlayer then
             return
         end
         local c = LocalPlayer.Character
@@ -375,61 +371,113 @@ local function setLocalPlayerFrozen(freeze)
 end
 
 -- =========================================================
--- ซ่อนตัวละครจริงของผู้เล่นอื่นเฉพาะมุมมองของเรา
+-- ระบบมุมกล้องถ่ายคลิป: มุมกว้างลอยกระทง -> ซูมโฟกัสเต้นทีละคน
 -- =========================================================
-local function setRealPlayersHidden(hidden)
-    if hideConnection then
-        hideConnection:Disconnect()
-        hideConnection = nil
+local function setCameraFocus(mode, anchorCf, spotlightModel, rowCount)
+    if currentCamMode ~= mode or currentSpotlightTarget ~= spotlightModel then
+        camClock = 0
+    end
+    currentCamMode = mode
+    if anchorCf then
+        currentCamAnchor = anchorCf
+    end
+    currentSpotlightTarget = spotlightModel
+    if rowCount then
+        currentRowCount = rowCount
+    end
+end
+
+local function setCinematicCameraEnabled(enabled)
+    if cameraConnection then
+        cameraConnection:Disconnect()
+        cameraConnection = nil
     end
 
-    if not hidden then
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer and player.Character then
-                for _, desc in ipairs(player.Character:GetDescendants()) do
-                    if desc:IsA("BasePart") then
-                        desc.LocalTransparencyModifier = 0
-                    end
-                end
-                local hum = player.Character:FindFirstChildOfClass("Humanoid")
-                if hum and savedDisplayTypes[hum] then
-                    hum.DisplayDistanceType = savedDisplayTypes[hum]
-                end
-            end
+    local cam = Workspace.CurrentCamera
+    if not cam then
+        return
+    end
+
+    if not enabled then
+        if savedCameraState then
+            cam.CameraType = savedCameraState.CameraType
+            cam.FieldOfView = savedCameraState.FieldOfView
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            cam.CameraSubject = hum or savedCameraState.CameraSubject
+            savedCameraState = nil
+        else
+            cam.CameraType = Enum.CameraType.Custom
         end
-        table.clear(savedDisplayTypes)
         return
     end
 
-    if not CONFIG.HideRealPlayers then
+    if not CONFIG.EnableCinematicCamera then
         return
     end
 
-    hideConnection = RunService.RenderStepped:Connect(function()
-        if not isEnabled then
+    if not savedCameraState then
+        savedCameraState = {
+            CameraType = cam.CameraType,
+            CameraSubject = cam.CameraSubject,
+            FieldOfView = cam.FieldOfView,
+        }
+    end
+
+    cam.CameraType = Enum.CameraType.Scriptable
+
+    cameraConnection = RunService.RenderStepped:Connect(function(dt)
+        if not isRunning or not CONFIG.EnableCinematicCamera then
             return
         end
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer and player.Character then
-                for _, desc in ipairs(player.Character:GetDescendants()) do
-                    if desc:IsA("BasePart") then
-                        desc.LocalTransparencyModifier = 1
-                    end
-                end
-                local hum = player.Character:FindFirstChildOfClass("Humanoid")
-                if hum then
-                    if not savedDisplayTypes[hum] then
-                        savedDisplayTypes[hum] = hum.DisplayDistanceType
-                    end
-                    hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-                end
+        local activeCam = Workspace.CurrentCamera
+        if not activeCam then
+            return
+        end
+        if activeCam.CameraType ~= Enum.CameraType.Scriptable then
+            activeCam.CameraType = Enum.CameraType.Scriptable
+        end
+
+        camClock = camClock + dt
+        local baseCf = currentCamAnchor
+        local halfSpan = math.max(1, math.ceil(currentRowCount / 2)) * CONFIG.LineupSpacing
+        local targetCf = activeCam.CFrame
+        local targetFov = 58
+
+        if currentCamMode == "wide_row" then
+            local panX = math.sin(camClock * 0.45) * math.min(8, halfSpan * 0.5)
+            local distZ = math.max(18, 13 + halfSpan * 0.85)
+            local camPos = (baseCf * CFrame.new(panX, 6.4, -distZ)).Position
+            local lookAt = (baseCf * CFrame.new(0, 2.0, -1.5)).Position
+            targetCf = CFrame.lookAt(camPos, lookAt)
+            targetFov = 58
+        elseif currentCamMode == "krathong_release" then
+            local distZ = math.max(20, 14 + halfSpan * 0.85)
+            local camPos = (baseCf * CFrame.new(math.sin(camClock * 0.35) * 3.0, 7.6, -distZ)).Position
+            local lookAt = (baseCf * CFrame.new(0, 1.3, -4.5)).Position
+            targetCf = CFrame.lookAt(camPos, lookAt)
+            targetFov = 62
+        elseif currentCamMode == "spotlight_person" and currentSpotlightTarget and currentSpotlightTarget.Parent then
+            local root = currentSpotlightTarget:FindFirstChild("HumanoidRootPart") or currentSpotlightTarget.PrimaryPart
+            if root then
+                local charYaw = root.CFrame - root.CFrame.Position
+                local charCenter = CFrame.new(root.Position) * charYaw
+                -- แพนกล้องเฉียงซ้าย-ขวาเบาๆ หน้าตัวละครคนนั้นเพื่อโชว์ท่าเต้นเต็มตัว
+                local orbitX = math.sin(camClock * 1.1) * 2.2
+                local camPos = (charCenter * CFrame.new(orbitX, 2.2, -9.2)).Position
+                local lookAt = (charCenter * CFrame.new(0, 0.4, 0)).Position
+                targetCf = CFrame.lookAt(camPos, lookAt)
+                targetFov = 50
             end
         end
+
+        local alpha = math.clamp(dt * 4.2, 0, 1)
+        activeCam.CFrame = activeCam.CFrame:Lerp(targetCf, alpha)
+        activeCam.FieldOfView = activeCam.FieldOfView + (targetFov - activeCam.FieldOfView) * alpha
     end)
 end
 
 -- =========================================================
--- สร้างโมเดลกระทงไทยสมจริง (PivotPart ตั้งตรง 100%)
+-- โมเดลกระทงไทยสมจริง + โคมลอย + ทะเลใหญ่
 -- =========================================================
 local function createRealisticKrathongModel(modelName)
     local model = Instance.new("Model")
@@ -617,16 +665,13 @@ local function createRealisticKrathongModel(modelName)
     return model
 end
 
--- =========================================================
--- สร้างโคมลอยสว่างบนท้องฟ้าเหนือทะเล
--- =========================================================
 local function spawnSkyLantern(anchorRoot, folder)
     if not CONFIG.EnableSkyLanterns then
         return
     end
     local yawOnly = anchorRoot.CFrame - anchorRoot.CFrame.Position
-    local offsetX = math.random(-65, 65)
-    local offsetZ = -math.random(25, 110)
+    local offsetX = math.random(-70, 70)
+    local offsetZ = -math.random(25, 115)
     local startPos = (anchorRoot.CFrame * CFrame.new(offsetX, math.random(2, 6), offsetZ)).Position
 
     local lantern = Instance.new("Part")
@@ -650,7 +695,7 @@ local function spawnSkyLantern(anchorRoot, folder)
         local t = 0
         local speedY = 2.4 + math.random() * 1.6
         local swaySeed = math.random() * 6.28
-        while lantern and lantern.Parent and isEnabled and t < 16 do
+        while lantern and lantern.Parent and isRunning and t < 16 do
             local dt = RunService.Heartbeat:Wait()
             t = t + dt
             local curPos = startPos + Vector3.new(
@@ -669,151 +714,19 @@ local function spawnSkyLantern(anchorRoot, folder)
     end)
 end
 
--- =========================================================
--- ระบบข้อต่อ Motor6D: ท่ารำวงถือกระทง / ท่าลอยกระทง / ท่าเต้นฉลองสนุกๆ
--- =========================================================
-local function snapshotCharacterMotors(char)
-    local motors = {}
-    for _, desc in ipairs(char:GetDescendants()) do
-        if desc:IsA("Motor6D") then
-            motors[desc.Name] = {
-                motor = desc,
-                origC0 = desc.C0,
-            }
-        end
-    end
-    return motors
-end
-
-local function restoreCharacterMotors(motors)
-    for _, info in pairs(motors) do
-        if info.motor and info.motor.Parent then
-            info.motor.C0 = info.origC0
-        end
-    end
-end
-
-local function setMotorAngle(motors, name, cfAngle)
-    local entry = motors[name]
-    if entry and entry.motor and entry.motor.Parent then
-        entry.motor.Transform = CFrame.identity
-        entry.motor.C0 = entry.origC0 * cfAngle
-    end
-end
-
--- ช่วงที่ 1: รำวงโยกตัวเข้าจังหวะเพลงขณะถือกระทงไว้ข้างหน้า
-local function applyRamwongHoldPose(motors, timeSec, phaseOffset)
-    local beat = (timeSec * 3.1 * CONFIG.DanceEnergy) + (phaseOffset or 0)
-    local sway = math.sin(beat)
-    local bounce = math.abs(math.cos(beat))
-
-    local armBase = 0.65 + bounce * 0.14
-    local armInward = 0.36
-    local waistYaw = sway * 0.18
-    local waistRoll = sway * 0.09
-    local headTilt = sway * 0.12
-
-    setMotorAngle(motors, "RightShoulder", CFrame.Angles(armBase, 0, -armInward + sway * 0.06))
-    setMotorAngle(motors, "LeftShoulder", CFrame.Angles(armBase, 0, armInward + sway * 0.06))
-    setMotorAngle(motors, "RightElbow", CFrame.Angles(0.62, 0, 0))
-    setMotorAngle(motors, "LeftElbow", CFrame.Angles(0.62, 0, 0))
-    setMotorAngle(motors, "Waist", CFrame.Angles(-0.04, waistYaw, waistRoll))
-    setMotorAngle(motors, "Neck", CFrame.Angles(-0.05 + bounce * 0.06, -waistYaw * 0.4, headTilt))
-
-    -- R6
-    setMotorAngle(motors, "Right Shoulder", CFrame.Angles(0, -armInward, armBase))
-    setMotorAngle(motors, "Left Shoulder", CFrame.Angles(0, armInward, -armBase))
-    setMotorAngle(motors, "RootJoint", CFrame.Angles(-0.04, waistRoll, waistYaw))
-end
-
--- ช่วงที่ 2: ท่าอธิษฐานและค่อยๆ ก้มปล่อยกระทงลงทะเล
-local function applyCeremonyPose(motors, prayWeight, bendWeight)
-    local armRaise = prayWeight * 0.72 + bendWeight * 0.58
-    local armInward = prayWeight * 0.36 + bendWeight * 0.25
-    local elbowBend = prayWeight * 0.65 - bendWeight * 0.2
-    local headBow = prayWeight * 0.28 + bendWeight * 0.35
-    local torsoBend = bendWeight * 0.55
-
-    setMotorAngle(motors, "RightShoulder", CFrame.Angles(armRaise, 0, -armInward))
-    setMotorAngle(motors, "LeftShoulder", CFrame.Angles(armRaise, 0, armInward))
-    setMotorAngle(motors, "RightElbow", CFrame.Angles(math.max(0, elbowBend), 0, 0))
-    setMotorAngle(motors, "LeftElbow", CFrame.Angles(math.max(0, elbowBend), 0, 0))
-    setMotorAngle(motors, "Waist", CFrame.Angles(-torsoBend, 0, 0))
-    setMotorAngle(motors, "Neck", CFrame.Angles(-headBow, 0, 0))
-
-    -- R6
-    setMotorAngle(motors, "Right Shoulder", CFrame.Angles(0, -armInward, armRaise))
-    setMotorAngle(motors, "Left Shoulder", CFrame.Angles(0, armInward, -armRaise))
-    setMotorAngle(motors, "RootJoint", CFrame.Angles(-torsoBend, 0, 0))
-end
-
--- ช่วงที่ 3: เต้นรำวงวันลอยกระทงและโบกมือฉลองสนุกๆ ริมทะเล
-local function applyFestivalDancePose(motors, timeSec, phaseOffset)
-    local beat = (timeSec * 3.8 * CONFIG.DanceEnergy) + (phaseOffset or 0)
-    local sway = math.sin(beat)
-    local altSway = math.cos(beat)
-    local pulse = math.sin(beat * 2)
-
-    -- รำวงจีบมือสลับขึ้นลงซ้าย-ขวาอย่างสนุกสนาน
-    local rightRaise = 1.45 + sway * 0.55
-    local leftRaise = 1.45 - sway * 0.55
-    local rightOut = 0.45 + altSway * 0.25
-    local leftOut = -0.45 + altSway * 0.25
-    local elbowR = 0.65 + pulse * 0.25
-    local elbowL = 0.65 - pulse * 0.25
-    local waistYaw = sway * 0.32
-    local waistRoll = altSway * 0.14
-    local headBob = pulse * 0.12
-
-    setMotorAngle(motors, "RightShoulder", CFrame.Angles(rightRaise, 0, rightOut))
-    setMotorAngle(motors, "LeftShoulder", CFrame.Angles(leftRaise, 0, leftOut))
-    setMotorAngle(motors, "RightElbow", CFrame.Angles(math.max(0.15, elbowR), 0, 0))
-    setMotorAngle(motors, "LeftElbow", CFrame.Angles(math.max(0.15, elbowL), 0, 0))
-    setMotorAngle(motors, "Waist", CFrame.Angles(-0.06 + pulse * 0.06, waistYaw, waistRoll))
-    setMotorAngle(motors, "Neck", CFrame.Angles(headBob, -waistYaw * 0.45, sway * 0.14))
-
-    -- R6
-    setMotorAngle(motors, "Right Shoulder", CFrame.Angles(0, rightOut * 0.4, rightRaise))
-    setMotorAngle(motors, "Left Shoulder", CFrame.Angles(0, leftOut * 0.4, -leftRaise))
-    setMotorAngle(motors, "RootJoint", CFrame.Angles(-0.05 + pulse * 0.05, waistRoll, waistYaw))
-end
-
-local function positionKrathongInHands(krathongModel, char, prayWeight, bendWeight, swayOffset)
-    if not krathongModel or not krathongModel.Parent or not char then
-        return
-    end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local chest = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or root
-    if not root or not chest then
-        return
-    end
-
-    local forwardDist = 1.55 + (bendWeight * 1.35)
-    local heightOffset = 0.08 + (prayWeight * 0.45) - (bendWeight * 1.45)
-    local yawOnly = root.CFrame - root.CFrame.Position
-    local anchorRef = CFrame.new(chest.Position) * yawOnly
-    local targetPos = (anchorRef * CFrame.new(swayOffset or 0, heightOffset, -forwardDist)).Position
-    krathongModel:PivotTo(CFrame.new(targetPos) * yawOnly)
-end
-
--- =========================================================
--- ความสูงพื้นรองรับทั้ง R6 และ R15 (ไม่จมพื้น)
--- =========================================================
-local function getRootOffsetFromFloor(char, hum, root)
-    if hum and hum.RigType == Enum.HumanoidRigType.R6 then
-        local leg = char:FindFirstChild("Left Leg") or char:FindFirstChild("Right Leg")
-        local legHeight = (leg and leg.Size.Y) or 2.0
-        return legHeight + (root.Size.Y * 0.5)
-    end
-    local hip = (hum and hum.HipHeight and hum.HipHeight > 0.1) and hum.HipHeight or 2.0
-    return hip + (root.Size.Y * 0.5)
-end
-
 local function getFloorY(referenceRoot, x, z)
+    local fallbackFloor = referenceRoot.Position.Y - 3.0
     local refChar = referenceRoot.Parent
     local refHum = refChar and refChar:FindFirstChildOfClass("Humanoid")
-    local refOffset = getRootOffsetFromFloor(refChar, refHum, referenceRoot)
-    local fallbackFloor = referenceRoot.Position.Y - refOffset
+    if refHum then
+        if refHum.RigType == Enum.HumanoidRigType.R6 then
+            local leg = refChar:FindFirstChild("Left Leg") or refChar:FindFirstChild("Right Leg")
+            fallbackFloor = referenceRoot.Position.Y - (((leg and leg.Size.Y) or 2.0) + referenceRoot.Size.Y * 0.5)
+        else
+            local hip = (refHum.HipHeight and refHum.HipHeight > 0.1) and refHum.HipHeight or 2.0
+            fallbackFloor = referenceRoot.Position.Y - (hip + referenceRoot.Size.Y * 0.5)
+        end
+    end
 
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
@@ -836,113 +749,6 @@ local function getFloorY(referenceRoot, x, z)
     return fallbackFloor
 end
 
-local function captureHealthyAppearance(player)
-    local char = player and player.Character
-    if not char then
-        return nil
-    end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local head = char:FindFirstChild("Head")
-    if not hum or hum.Health <= 0 or not root or not head then
-        return cachedHealthyAppearances[player.UserId]
-    end
-
-    local prevArch = char.Archivable
-    char.Archivable = true
-    local template = char:Clone()
-    char.Archivable = prevArch
-    if not template then
-        return cachedHealthyAppearances[player.UserId]
-    end
-
-    for _, desc in ipairs(template:GetDescendants()) do
-        if desc:IsA("Script") or desc:IsA("LocalScript") or desc:IsA("Tool") then
-            desc:Destroy()
-        elseif desc:IsA("BasePart") then
-            desc.LocalTransparencyModifier = 0
-            desc.CanCollide = false
-            desc.Anchored = false
-            desc.AssemblyLinearVelocity = Vector3.zero
-            desc.AssemblyAngularVelocity = Vector3.zero
-        end
-    end
-
-    local oldCache = cachedHealthyAppearances[player.UserId]
-    if oldCache then
-        oldCache:Destroy()
-    end
-    cachedHealthyAppearances[player.UserId] = template
-    return template
-end
-
-local function spawnFreshClone(sourcePlayer, cloneLabel, targetPos, facingYawCFrame)
-    local template = captureHealthyAppearance(sourcePlayer)
-    if not template then
-        return nil
-    end
-
-    local clone = template:Clone()
-    if not clone then
-        return nil
-    end
-
-    clone.Name = cloneLabel or (sourcePlayer.Name .. "_Festival")
-
-    local hum = clone:FindFirstChildOfClass("Humanoid")
-    local root = clone:FindFirstChild("HumanoidRootPart") or clone.PrimaryPart
-    if hum then
-        hum.DisplayName = sourcePlayer.DisplayName
-        hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
-        hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOn
-        hum.MaxHealth = 100
-        hum.Health = 100
-        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-    end
-
-    local folder = ensureIllusionFolder()
-    clone.Parent = folder
-
-    if root and targetPos then
-        local offsetFromFloor = getRootOffsetFromFloor(clone, hum, root)
-        local exactRootY = targetPos.Y + offsetFromFloor
-        local finalCf = CFrame.new(targetPos.X, exactRootY, targetPos.Z) * (facingYawCFrame or CFrame.identity)
-        clone:PivotTo(finalCf)
-        root.Anchored = true
-    end
-
-    return clone
-end
-
-local function gatherTargetSources()
-    local targets = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            if captureHealthyAppearance(player) then
-                table.insert(targets, {
-                    player = player,
-                    label = player.DisplayName,
-                })
-            end
-        end
-    end
-
-    if #targets == 0 and CONFIG.SoloFallbackClones > 0 and LocalPlayer.Character then
-        captureHealthyAppearance(LocalPlayer)
-        for i = 1, CONFIG.SoloFallbackClones do
-            table.insert(targets, {
-                player = LocalPlayer,
-                label = LocalPlayer.DisplayName .. " #" .. i,
-            })
-        end
-    end
-
-    return targets
-end
-
--- =========================================================
--- เสกทะเลใหญ่ด้านหน้าแถวหน้ากระดาน + ปล่อยกระทงลอยออกทะเล
--- =========================================================
 local function spawnHugeOceanInFront(anchorRoot, folder)
     local yawOnly = anchorRoot.CFrame - anchorRoot.CFrame.Position
     local floorY = getFloorY(anchorRoot, anchorRoot.Position.X, anchorRoot.Position.Z)
@@ -1025,6 +831,190 @@ local function spawnHugeOceanInFront(anchorRoot, folder)
     return oceanModel, surfaceY
 end
 
+-- =========================================================
+-- ระบบอนิเมชั่นข้อต่อเต็มตัว 6 สไตล์ (แขน ศอก ข้อมือ เอว สะโพก ขา เข่า ไม่ใช่แค่ยกหัว!)
+-- =========================================================
+local function snapshotCharacterMotors(char)
+    local motors = {}
+    for _, desc in ipairs(char:GetDescendants()) do
+        if desc:IsA("Motor6D") then
+            motors[desc.Name] = {
+                motor = desc,
+                origC0 = desc.C0,
+            }
+        end
+    end
+    return motors
+end
+
+local function restoreCharacterMotors(motors)
+    for _, info in pairs(motors) do
+        if info.motor and info.motor.Parent then
+            info.motor.C0 = info.origC0
+        end
+    end
+end
+
+local function setMotorAngle(motors, name, cfAngle)
+    local entry = motors[name]
+    if entry and entry.motor and entry.motor.Parent then
+        entry.motor.Transform = CFrame.identity
+        entry.motor.C0 = entry.origC0 * cfAngle
+    end
+end
+
+local function applyCeremonyPose(motors, prayWeight, bendWeight)
+    local armRaise = prayWeight * 0.72 + bendWeight * 0.58
+    local armInward = prayWeight * 0.36 + bendWeight * 0.25
+    local elbowBend = prayWeight * 0.65 - bendWeight * 0.2
+    local headBow = prayWeight * 0.28 + bendWeight * 0.35
+    local torsoBend = bendWeight * 0.55
+
+    setMotorAngle(motors, "RightShoulder", CFrame.Angles(armRaise, 0, -armInward))
+    setMotorAngle(motors, "LeftShoulder", CFrame.Angles(armRaise, 0, armInward))
+    setMotorAngle(motors, "RightElbow", CFrame.Angles(math.max(0, elbowBend), 0, 0))
+    setMotorAngle(motors, "LeftElbow", CFrame.Angles(math.max(0, elbowBend), 0, 0))
+    setMotorAngle(motors, "Waist", CFrame.Angles(-torsoBend, 0, 0))
+    setMotorAngle(motors, "Neck", CFrame.Angles(-headBow, 0, 0))
+    setMotorAngle(motors, "RightHip", CFrame.Angles(bendWeight * 0.22, 0, 0))
+    setMotorAngle(motors, "LeftHip", CFrame.Angles(bendWeight * 0.22, 0, 0))
+    setMotorAngle(motors, "RightKnee", CFrame.Angles(-bendWeight * 0.35, 0, 0))
+    setMotorAngle(motors, "LeftKnee", CFrame.Angles(-bendWeight * 0.35, 0, 0))
+
+    -- R6 fallback
+    setMotorAngle(motors, "Right Shoulder", CFrame.Angles(0, -armInward, armRaise))
+    setMotorAngle(motors, "Left Shoulder", CFrame.Angles(0, armInward, -armRaise))
+    setMotorAngle(motors, "RootJoint", CFrame.Angles(-torsoBend, 0, 0))
+end
+
+-- สไตล์การเต้นเต็มตัว 6 แบบ (แต่ละคนสุ่มและสลับหลายท่าในรอบตัวเอง!)
+local function applyUniqueFullBodyDance(motors, danceStyle, timeSec, phaseOffset)
+    local t = (timeSec * 4.2 * CONFIG.DanceEnergy) + (phaseOffset or 0)
+    local s1 = math.sin(t)
+    local c1 = math.cos(t)
+    local s2 = math.sin(t * 2)
+    local absBounce = math.abs(s1)
+
+    if danceStyle == 1 then
+        -- ท่าที่ 1: รำวงไทยเต็มวง (วาดแขนสลับสูงต่ำ บิดเอว ย่อเข่าจังหวะ)
+        setMotorAngle(motors, "Root", CFrame.new(s1 * 0.25, -absBounce * 0.18, 0) * CFrame.Angles(0, s1 * 0.22, 0))
+        setMotorAngle(motors, "Waist", CFrame.Angles(0.05, s1 * 0.35, c1 * 0.14))
+        setMotorAngle(motors, "RightShoulder", CFrame.Angles(1.5 + s1 * 0.7, 0.3 * c1, 0.55 + c1 * 0.25))
+        setMotorAngle(motors, "LeftShoulder", CFrame.Angles(1.5 - s1 * 0.7, -0.3 * c1, -0.55 + c1 * 0.25))
+        setMotorAngle(motors, "RightElbow", CFrame.Angles(0.85 + s2 * 0.3, 0, 0))
+        setMotorAngle(motors, "LeftElbow", CFrame.Angles(0.85 - s2 * 0.3, 0, 0))
+        setMotorAngle(motors, "RightWrist", CFrame.Angles(0, s2 * 0.45, c1 * 0.35))
+        setMotorAngle(motors, "LeftWrist", CFrame.Angles(0, -s2 * 0.45, -c1 * 0.35))
+        setMotorAngle(motors, "RightHip", CFrame.Angles(absBounce * 0.45, 0, 0.1))
+        setMotorAngle(motors, "LeftHip", CFrame.Angles(absBounce * 0.45, 0, -0.1))
+        setMotorAngle(motors, "RightKnee", CFrame.Angles(-absBounce * 0.75, 0, 0))
+        setMotorAngle(motors, "LeftKnee", CFrame.Angles(-absBounce * 0.75, 0, 0))
+        setMotorAngle(motors, "Neck", CFrame.Angles(0.08, -s1 * 0.2, c1 * 0.15))
+
+    elseif danceStyle == 2 then
+        -- ท่าที่ 2: ปาร์ตี้ดิสโก้ชูมือขึ้นฟ้าสลับข้าง + ก้าวขาเท่ๆ
+        setMotorAngle(motors, "Root", CFrame.new(0, math.abs(s2) * 0.22, 0) * CFrame.Angles(0, c1 * 0.25, s1 * 0.12))
+        setMotorAngle(motors, "Waist", CFrame.Angles(-0.08, s1 * 0.42, s1 * 0.18))
+        setMotorAngle(motors, "RightShoulder", CFrame.Angles(2.35 + s1 * 0.65, 0, 0.45))
+        setMotorAngle(motors, "LeftShoulder", CFrame.Angles(0.65 - s1 * 0.85, 0, -0.45))
+        setMotorAngle(motors, "RightElbow", CFrame.Angles(0.35 + absBounce * 0.4, 0, 0))
+        setMotorAngle(motors, "LeftElbow", CFrame.Angles(0.95 - absBounce * 0.3, 0, 0))
+        setMotorAngle(motors, "RightHip", CFrame.Angles(math.max(0, s1) * 0.65, 0, 0.12))
+        setMotorAngle(motors, "LeftHip", CFrame.Angles(math.max(0, -s1) * 0.65, 0, -0.12))
+        setMotorAngle(motors, "RightKnee", CFrame.Angles(-math.max(0, s1) * 0.9, 0, 0))
+        setMotorAngle(motors, "LeftKnee", CFrame.Angles(-math.max(0, -s1) * 0.9, 0, 0))
+        setMotorAngle(motors, "Neck", CFrame.Angles(s2 * 0.18, s1 * 0.25, 0))
+
+    elseif danceStyle == 3 then
+        -- ท่าที่ 3: ฮิปฮอปเบานซ์ เหวี่ยงแขนไขว้อก & ย่อตัวพริ้ว
+        setMotorAngle(motors, "Root", CFrame.new(c1 * 0.35, -absBounce * 0.28, 0) * CFrame.Angles(-0.12, s1 * 0.3, 0))
+        setMotorAngle(motors, "Waist", CFrame.Angles(-0.22 + s2 * 0.12, -s1 * 0.35, c1 * 0.15))
+        setMotorAngle(motors, "RightShoulder", CFrame.Angles(1.15 + c1 * 0.55, 0, -0.55 + s1 * 0.45))
+        setMotorAngle(motors, "LeftShoulder", CFrame.Angles(1.15 - c1 * 0.55, 0, 0.55 + s1 * 0.45))
+        setMotorAngle(motors, "RightElbow", CFrame.Angles(1.1 + s2 * 0.35, 0, 0))
+        setMotorAngle(motors, "LeftElbow", CFrame.Angles(1.1 - s2 * 0.35, 0, 0))
+        setMotorAngle(motors, "RightHip", CFrame.Angles(0.45 + absBounce * 0.35, 0, 0.18))
+        setMotorAngle(motors, "LeftHip", CFrame.Angles(0.45 + absBounce * 0.35, 0, -0.18))
+        setMotorAngle(motors, "RightKnee", CFrame.Angles(-0.75 - absBounce * 0.45, 0, 0))
+        setMotorAngle(motors, "LeftKnee", CFrame.Angles(-0.75 - absBounce * 0.45, 0, 0))
+        setMotorAngle(motors, "Neck", CFrame.Angles(-0.15 + s2 * 0.15, c1 * 0.2, 0))
+
+    elseif danceStyle == 4 then
+        -- ท่าที่ 4: กระโดดตบมือเหนือหัวสุดร่าเริง
+        local hop = math.max(0, math.sin(t * 1.35))
+        setMotorAngle(motors, "Root", CFrame.new(0, hop * 0.95, 0) * CFrame.Angles(0, s1 * 0.15, 0))
+        setMotorAngle(motors, "Waist", CFrame.Angles(hop * 0.12, 0, s1 * 0.12))
+        local clapAngle = 0.25 + (1 - hop) * 0.55
+        setMotorAngle(motors, "RightShoulder", CFrame.Angles(2.45, 0, -clapAngle))
+        setMotorAngle(motors, "LeftShoulder", CFrame.Angles(2.45, 0, clapAngle))
+        setMotorAngle(motors, "RightElbow", CFrame.Angles(0.55, 0, 0))
+        setMotorAngle(motors, "LeftElbow", CFrame.Angles(0.55, 0, 0))
+        setMotorAngle(motors, "RightHip", CFrame.Angles(hop * 0.4, 0, hop * 0.25))
+        setMotorAngle(motors, "LeftHip", CFrame.Angles(hop * 0.4, 0, -hop * 0.25))
+        setMotorAngle(motors, "RightKnee", CFrame.Angles(-hop * 0.7, 0, 0))
+        setMotorAngle(motors, "LeftKnee", CFrame.Angles(-hop * 0.7, 0, 0))
+        setMotorAngle(motors, "Neck", CFrame.Angles(hop * 0.18, 0, s1 * 0.15))
+
+    elseif danceStyle == 5 then
+        -- ท่าที่ 5: โยกสะโพกซ้าย-ขวา เตะขาสลับ + แกว่งแขนกว้าง
+        setMotorAngle(motors, "Root", CFrame.new(s1 * 0.55, absBounce * 0.15, 0) * CFrame.Angles(0, 0, -s1 * 0.16))
+        setMotorAngle(motors, "Waist", CFrame.Angles(0.06, -s1 * 0.45, s1 * 0.22))
+        setMotorAngle(motors, "RightShoulder", CFrame.Angles(0.9 + c1 * 0.95, 0, 0.75 + s1 * 0.3))
+        setMotorAngle(motors, "LeftShoulder", CFrame.Angles(0.9 - c1 * 0.95, 0, -0.75 + s1 * 0.3))
+        setMotorAngle(motors, "RightElbow", CFrame.Angles(0.45 + absBounce * 0.45, 0, 0))
+        setMotorAngle(motors, "LeftElbow", CFrame.Angles(0.45 + absBounce * 0.45, 0, 0))
+        setMotorAngle(motors, "RightHip", CFrame.Angles(math.max(0, s1) * 0.85, 0, 0.22))
+        setMotorAngle(motors, "LeftHip", CFrame.Angles(math.max(0, -s1) * 0.85, 0, -0.22))
+        setMotorAngle(motors, "RightKnee", CFrame.Angles(-0.25, 0, 0))
+        setMotorAngle(motors, "LeftKnee", CFrame.Angles(-0.25, 0, 0))
+        setMotorAngle(motors, "Neck", CFrame.Angles(0, s1 * 0.3, -s1 * 0.16))
+
+    else
+        -- ท่าที่ 6: หมุนตัว 360 องศา + โบกมือสองข้างให้กล้อง
+        local spinYaw = (timeSec * 2.8 * CONFIG.DanceEnergy) + (phaseOffset or 0)
+        setMotorAngle(motors, "Root", CFrame.new(0, absBounce * 0.25, 0) * CFrame.Angles(0, spinYaw, 0))
+        setMotorAngle(motors, "Waist", CFrame.Angles(-0.08, s1 * 0.25, c1 * 0.12))
+        setMotorAngle(motors, "RightShoulder", CFrame.Angles(2.15, 0, 0.5 + s2 * 0.35))
+        setMotorAngle(motors, "LeftShoulder", CFrame.Angles(2.15, 0, -0.5 - s2 * 0.35))
+        setMotorAngle(motors, "RightElbow", CFrame.Angles(0.65 + s2 * 0.4, 0, 0))
+        setMotorAngle(motors, "LeftElbow", CFrame.Angles(0.65 - s2 * 0.4, 0, 0))
+        setMotorAngle(motors, "RightHip", CFrame.Angles(absBounce * 0.35, 0, 0.1))
+        setMotorAngle(motors, "LeftHip", CFrame.Angles(absBounce * 0.35, 0, -0.1))
+        setMotorAngle(motors, "RightKnee", CFrame.Angles(-absBounce * 0.55, 0, 0))
+        setMotorAngle(motors, "LeftKnee", CFrame.Angles(-absBounce * 0.55, 0, 0))
+        setMotorAngle(motors, "Neck", CFrame.Angles(0.1, s1 * 0.2, 0))
+    end
+
+    -- รองรับกรณีตัวละคร LocalPlayer เป็น R6
+    setMotorAngle(motors, "Right Shoulder", CFrame.Angles(0, s1 * 0.4, 1.55 + c1 * 0.65))
+    setMotorAngle(motors, "Left Shoulder", CFrame.Angles(0, -s1 * 0.4, -1.55 + c1 * 0.65))
+    setMotorAngle(motors, "Right Hip", CFrame.Angles(0, 0, s1 * 0.45))
+    setMotorAngle(motors, "Left Hip", CFrame.Angles(0, 0, s1 * 0.45))
+    if danceStyle == 6 then
+        setMotorAngle(motors, "RootJoint", CFrame.Angles(0, 0, (timeSec * 2.8 * CONFIG.DanceEnergy)))
+    else
+        setMotorAngle(motors, "RootJoint", CFrame.Angles(-0.06, s1 * 0.15, s1 * 0.25))
+    end
+end
+
+local function positionKrathongInHands(krathongModel, char, prayWeight, bendWeight, swayOffset)
+    if not krathongModel or not krathongModel.Parent or not char then
+        return
+    end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local chest = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or root
+    if not root or not chest then
+        return
+    end
+
+    local forwardDist = 1.55 + (bendWeight * 1.35)
+    local heightOffset = 0.08 + (prayWeight * 0.45) - (bendWeight * 1.45)
+    local yawOnly = root.CFrame - root.CFrame.Position
+    local anchorRef = CFrame.new(chest.Position) * yawOnly
+    local targetPos = (anchorRef * CFrame.new(swayOffset or 0, heightOffset, -forwardDist)).Position
+    krathongModel:PivotTo(CFrame.new(targetPos) * yawOnly)
+end
+
 local function releaseKrathongToOcean(krathongModel, surfaceY, yawOnly, folder)
     if not krathongModel or not krathongModel.Parent then
         return
@@ -1068,7 +1058,7 @@ local function releaseKrathongToOcean(krathongModel, surfaceY, yawOnly, folder)
         local elapsed = 0
         local driftSpeed = 3.2 + (math.random() * 1.2)
         local bobSeed = math.random() * 6.28
-        while krathongModel and krathongModel.Parent and isEnabled do
+        while krathongModel and krathongModel.Parent and isRunning do
             local dt = RunService.Heartbeat:Wait()
             elapsed = elapsed + dt
             local forwardDist = elapsed * driftSpeed
@@ -1087,47 +1077,47 @@ local function playSlowKrathongAnimation(char, motors, krathongModel, surfaceY, 
     local yawOnly = root.CFrame - root.CFrame.Position
 
     local t1 = 0
-    while t1 < 0.9 and isEnabled and sessionToken == currentToken do
+    while t1 < 0.85 and isRunning and sessionToken == currentToken do
         local dt = RunService.RenderStepped:Wait()
-        t1 = math.min(0.9, t1 + dt)
-        local alpha = math.sin((t1 / 0.9) * (math.pi * 0.5))
+        t1 = math.min(0.85, t1 + dt)
+        local alpha = math.sin((t1 / 0.85) * (math.pi * 0.5))
         applyCeremonyPose(motors, alpha, 0)
         positionKrathongInHands(krathongModel, char, alpha, 0)
     end
 
-    if not isEnabled or sessionToken ~= currentToken then
+    if not isRunning or sessionToken ~= currentToken then
         return
     end
 
     local t2 = 0
-    while t2 < 1.5 and isEnabled and sessionToken == currentToken do
+    while t2 < 1.35 and isRunning and sessionToken == currentToken do
         local dt = RunService.RenderStepped:Wait()
-        t2 = math.min(1.5, t2 + dt)
-        local alpha = t2 / 1.5
+        t2 = math.min(1.35, t2 + dt)
+        local alpha = t2 / 1.35
         local smooth = alpha * alpha * (3 - 2 * alpha)
         applyCeremonyPose(motors, 1 - smooth * 0.25, smooth)
         positionKrathongInHands(krathongModel, char, 1 - smooth * 0.25, smooth)
     end
 
-    if not isEnabled or sessionToken ~= currentToken then
+    if not isRunning or sessionToken ~= currentToken then
         return
     end
 
     releaseKrathongToOcean(krathongModel, surfaceY, yawOnly, folder)
 
     local t3 = 0
-    while t3 < 0.75 and isEnabled and sessionToken == currentToken do
+    while t3 < 0.65 and isRunning and sessionToken == currentToken do
         local dt = RunService.RenderStepped:Wait()
-        t3 = math.min(0.75, t3 + dt)
-        local remain = 1 - (t3 / 0.75)
+        t3 = math.min(0.65, t3 + dt)
+        local remain = 1 - (t3 / 0.65)
         applyCeremonyPose(motors, remain * 0.45, remain)
     end
 end
 
 -- =========================================================
--- ล้างฉาก เพลง และคืนมุมกล้องปกติทันทีเมื่อกดปิด
+-- ล้างฉากและคืนค่าปกติเมื่อกดหยุด
 -- =========================================================
-local function clearAllIllusions()
+local function clearFestivalScene()
     stopBackgroundMusic()
     setCinematicCameraEnabled(false)
 
@@ -1143,16 +1133,54 @@ local function clearAllIllusions()
     end
     restoreCharacterMotors(savedSelfMotors)
     table.clear(savedSelfMotors)
-    setRealPlayersHidden(false)
     setLocalPlayerFrozen(false)
 end
 
 -- =========================================================
--- ลูปหลักงานลอยกระทง (ไม่มีการตาย ซิงค์ตามความยาวเพลงวนซ้ำ)
+-- รวบรวมอวาต้าที่ดึงไว้ (ดึงแถวที่พิมพ์ค้างไว้ให้อัตโนมัติด้วย)
 -- =========================================================
-local function startFestivalLoop(currentToken)
+local function collectRosterForRun()
+    local roster = {}
+    for _, row in ipairs(inviteRows) do
+        local typed = row.nameBox.Text:match("^%s*(.-)%s*$")
+        if typed and typed ~= "" then
+            if not row.pulledData then
+                row.pullBtn.Text = "กำลังดึง..."
+                local data, err = fetchRobloxUserAvatar(typed)
+                if data then
+                    row.pulledData = data
+                    row.status = "pulled"
+                    row.pullBtn.Text = "ดึงแล้ว"
+                    row.pullBtn.BackgroundColor3 = Color3.fromRGB(21, 128, 61)
+                else
+                    row.pullBtn.Text = err or "ไม่พบชื่อ"
+                    row.pullBtn.BackgroundColor3 = Color3.fromRGB(185, 28, 28)
+                end
+            end
+            if row.pulledData then
+                table.insert(roster, row.pulledData)
+            end
+        end
+    end
+
+    -- กรณีไม่ได้ใส่ชื่อใครเลย ให้ดึงตัวเราเองแสดงตัวอย่างเพื่อให้ทำงานได้ทันที
+    if #roster == 0 then
+        table.insert(roster, {
+            username = LocalPlayer.DisplayName,
+            userId = LocalPlayer.UserId,
+            description = nil,
+            fallbackChar = LocalPlayer.Character,
+        })
+    end
+
+    return roster
+end
+
+-- =========================================================
+-- ลูปหลัก: รอ 3 วิ -> ลอยกระทงทันที -> กล้องวนหาทีละคนเต้นสุ่ม -> วนซ้ำ
+-- =========================================================
+local function startFestivalShow(currentToken)
     local folder = ensureIllusionFolder()
-    setRealPlayersHidden(true)
     setLocalPlayerFrozen(true)
     startBackgroundMusic(currentToken)
     setCinematicCameraEnabled(true)
@@ -1160,12 +1188,12 @@ local function startFestivalLoop(currentToken)
     task.spawn(function()
         local myChar = LocalPlayer.Character
         local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        while (not myRoot) and isEnabled and sessionToken == currentToken do
+        while (not myRoot) and isRunning and sessionToken == currentToken do
             task.wait(0.2)
             myChar = LocalPlayer.Character
             myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
         end
-        if not isEnabled or sessionToken ~= currentToken or not myRoot then
+        if not isRunning or sessionToken ~= currentToken or not myRoot then
             return
         end
 
@@ -1173,13 +1201,17 @@ local function startFestivalLoop(currentToken)
         local anchorCf = myRoot.CFrame
         local yawOnly = anchorCf - anchorCf.Position
 
-        -- เสกทะเลขนาดใหญ่ด้านหน้าเราทันที
+        -- เสกทะเลใหญ่ด้านหน้าเรา
         local _, oceanSurfaceY = spawnHugeOceanInFront(myRoot, folder)
 
-        -- สร้างแถวหน้ากระดานแถวเดียวกับเรา (เลือดเต็ม 100% ทุกคน)
-        local targets = gatherTargetSources()
-        local lineupEntries = {}
-        for idx, entry in ipairs(targets) do
+        -- ดึงอวาต้าทุกคนจากรายชื่อและสร้างแถวหน้ากระดานยืนตรงความสูงเท่ากัน
+        local roster = collectRosterForRun()
+        if not isRunning or sessionToken ~= currentToken then
+            return
+        end
+
+        local dancers = {}
+        for idx, entry in ipairs(roster) do
             local tier = math.ceil(idx / 2)
             local side = (idx % 2 == 1) and -1 or 1
             local xOffset = side * tier * CONFIG.LineupSpacing
@@ -1187,175 +1219,154 @@ local function startFestivalLoop(currentToken)
             local slotFloorY = getFloorY(myRoot, slotWorld.X, slotWorld.Z)
             local spawnPos = Vector3.new(slotWorld.X, slotFloorY, slotWorld.Z)
 
-            local clone = spawnFreshClone(entry.player, entry.label, spawnPos, yawOnly)
-            if clone then
-                table.insert(lineupEntries, {
-                    clone = clone,
-                    motors = snapshotCharacterMotors(clone),
+            local avatarModel = createNormalizedAvatarModel(entry, spawnPos, yawOnly, folder)
+            if avatarModel then
+                table.insert(dancers, {
+                    model = avatarModel,
+                    motors = snapshotCharacterMotors(avatarModel),
                     krathong = nil,
-                    phaseOffset = idx * 0.35,
+                    danceStyle = math.random(1, 6),
+                    phaseOffset = idx * 0.65,
+                    isSelf = false,
                 })
             end
         end
 
         savedSelfMotors = snapshotCharacterMotors(myChar)
 
-        -- ตัวปล่อยโคมลอยเป็นระยะตลอดงาน
+        -- ลำดับรายชื่อที่จะให้กล้องโฟกัสทีละคน (รวมตัวเราด้วย)
+        local spotlightQueue = {}
+        for _, d in ipairs(dancers) do
+            table.insert(spotlightQueue, d)
+        end
+        table.insert(spotlightQueue, {
+            model = myChar,
+            motors = savedSelfMotors,
+            danceStyle = math.random(1, 6),
+            phaseOffset = 0,
+            isSelf = true,
+        })
+
+        -- ปล่อยโคมลอยเป็นระยะตลอดงาน
         task.spawn(function()
-            while isEnabled and sessionToken == currentToken do
+            while isRunning and sessionToken == currentToken do
                 spawnSkyLantern(myRoot, folder)
                 task.wait(1.6)
             end
         end)
 
-        -- วนลูปงานเทศกาลลอยกระทงยาวซิงค์ตามความยาวจริงของเพลง
-        while isEnabled and sessionToken == currentToken do
-            -- เตรียมกระทงใหม่ใส่มือทุกคนสำหรับรอบนี้
-            for idx, item in ipairs(lineupEntries) do
-                item.krathong = createRealisticKrathongModel("Krathong_" .. idx)
-                item.krathong.Parent = folder
+        -- วนซ้ำรอบ: [รอ 3 วิลอยกระทงทันที] -> [กล้องไปหาทีละคนเต้นสุ่มหลายท่า] -> [วนกลับลอยกระทง]
+        while isRunning and sessionToken == currentToken do
+            -- เตรียมกระทงตั้งตรงใส่มือทุกคน
+            for idx, d in ipairs(dancers) do
+                d.krathong = createRealisticKrathongModel("Krathong_" .. idx)
+                d.krathong.Parent = folder
+                applyCeremonyPose(d.motors, 0.2, 0)
+                positionKrathongInHands(d.krathong, d.model, 0.2, 0, 0)
             end
-
             if CONFIG.GiveSelfKrathong then
                 activeSelfKrathongModel = createRealisticKrathongModel("Krathong_Self")
                 activeSelfKrathongModel.Parent = folder
-            else
-                activeSelfKrathongModel = nil
+                applyCeremonyPose(savedSelfMotors, 0.2, 0)
+                positionKrathongInHands(activeSelfKrathongModel, myChar, 0.2, 0, 0)
             end
 
-            local songLen = getSyncedSongDuration()
-            local tAct1End = songLen * 0.35
-            local tSelfRelease = tAct1End
-            local tGroupRelease = tAct1End + CONFIG.GroupFollowDelaySec
-            local tAct3Start = math.max(tGroupRelease + 3.2, songLen * 0.60)
-            local tFinaleStart = songLen * 0.88
-
-            local selfTriggered = false
-            local groupTriggered = false
-            local selfDone = false
-            local groupDone = false
-            local finaleSpawned = false
-            local cycleElapsed = 0
-
-            while isEnabled and sessionToken == currentToken do
+            -- 1) รอ 3 วินาที แล้วลอยกระทงทันที
+            setCameraFocus("wide_row", anchorCf, nil, #dancers)
+            local waitElapsed = 0
+            while waitElapsed < CONFIG.PreFloatWaitSec and isRunning and sessionToken == currentToken do
                 local dt = RunService.RenderStepped:Wait()
-                cycleElapsed = cycleElapsed + dt
-                songLen = getSyncedSongDuration()
-                tAct1End = songLen * 0.35
-                tSelfRelease = tAct1End
-                tGroupRelease = tAct1End + CONFIG.GroupFollowDelaySec
-                tAct3Start = math.max(tGroupRelease + 3.2, songLen * 0.60)
-                tFinaleStart = songLen * 0.88
-
-                -- ช่วงที่ 1: รำวงถือกระทงโยกตัวเข้าจังหวะเพลง
-                if cycleElapsed < tSelfRelease then
-                    setCameraStage("act1_ramwong_krathong", anchorCf, #lineupEntries)
-                    if activeSelfKrathongModel then
-                        applyRamwongHoldPose(savedSelfMotors, cycleElapsed, 0)
-                        local selfSway = math.sin(cycleElapsed * 3.1 * CONFIG.DanceEnergy) * 0.14
-                        positionKrathongInHands(activeSelfKrathongModel, myChar, 0.25, 0, selfSway)
-                    end
-                    for _, item in ipairs(lineupEntries) do
-                        applyRamwongHoldPose(item.motors, cycleElapsed, item.phaseOffset)
-                        local swayX = math.sin((cycleElapsed * 3.1 * CONFIG.DanceEnergy) + item.phaseOffset) * 0.14
-                        positionKrathongInHands(item.krathong, item.clone, 0.25, 0, swayX)
-                    end
-
-                -- ช่วงที่ 2: ตัวเราก้มลอยกระทง -> อีก 2 วิทุกคนปล่อยตามพร้อมกัน
-                elseif cycleElapsed < tAct3Start then
-                    if not selfTriggered then
-                        selfTriggered = true
-                        setCameraStage("act2_self_release", anchorCf, #lineupEntries)
-                        task.spawn(function()
-                            if activeSelfKrathongModel then
-                                local k = activeSelfKrathongModel
-                                activeSelfKrathongModel = nil
-                                playSlowKrathongAnimation(myChar, savedSelfMotors, k, oceanSurfaceY, folder, currentToken)
-                            end
-                            selfDone = true
-                        end)
-                    end
-
-                    if cycleElapsed < tGroupRelease then
-                        for _, item in ipairs(lineupEntries) do
-                            applyRamwongHoldPose(item.motors, cycleElapsed, item.phaseOffset)
-                            local swayX = math.sin((cycleElapsed * 3.1 * CONFIG.DanceEnergy) + item.phaseOffset) * 0.14
-                            positionKrathongInHands(item.krathong, item.clone, 0.25, 0, swayX)
-                        end
-                    elseif not groupTriggered then
-                        groupTriggered = true
-                        setCameraStage("act2_group_release", anchorCf, #lineupEntries)
-                        local remaining = #lineupEntries
-                        if remaining == 0 then
-                            groupDone = true
-                        end
-                        for _, item in ipairs(lineupEntries) do
-                            local k = item.krathong
-                            item.krathong = nil
-                            task.spawn(function()
-                                if k then
-                                    playSlowKrathongAnimation(item.clone, item.motors, k, oceanSurfaceY, folder, currentToken)
-                                end
-                                remaining = remaining - 1
-                                if remaining <= 0 then
-                                    groupDone = true
-                                end
-                            end)
-                        end
-                    end
-
-                    if selfDone then
-                        applyFestivalDancePose(savedSelfMotors, cycleElapsed, 0)
-                    end
-                    if groupDone then
-                        for _, item in ipairs(lineupEntries) do
-                            applyFestivalDancePose(item.motors, cycleElapsed, item.phaseOffset)
-                        end
-                    end
-
-                -- ช่วงที่ 3 & 4: เต้นรำวงโบกมือฉลองริมทะเล + ปล่อยกระทงรอบส่งท้ายก่อนวนเพลง
-                else
-                    if cycleElapsed < tFinaleStart then
-                        setCameraStage("act3_celebration_dance", anchorCf, #lineupEntries)
-                    else
-                        setCameraStage("act4_finale_wave", anchorCf, #lineupEntries)
-                        if not finaleSpawned then
-                            finaleSpawned = true
-                            for idx, item in ipairs(lineupEntries) do
-                                local finaleK = createRealisticKrathongModel("FinaleKrathong_" .. idx)
-                                finaleK.Parent = folder
-                                local root = item.clone:FindFirstChild("HumanoidRootPart")
-                                if root then
-                                    local pos = (root.CFrame * CFrame.new(0, 0, -2.2)).Position
-                                    finaleK:PivotTo(CFrame.new(pos.X, oceanSurfaceY + 0.24, pos.Z) * yawOnly)
-                                    releaseKrathongToOcean(finaleK, oceanSurfaceY, yawOnly, folder)
-                                end
-                            end
-                            if CONFIG.GiveSelfKrathong then
-                                local selfFinale = createRealisticKrathongModel("FinaleKrathong_Self")
-                                selfFinale.Parent = folder
-                                local pos = (myRoot.CFrame * CFrame.new(0, 0, -2.2)).Position
-                                selfFinale:PivotTo(CFrame.new(pos.X, oceanSurfaceY + 0.24, pos.Z) * yawOnly)
-                                releaseKrathongToOcean(selfFinale, oceanSurfaceY, yawOnly, folder)
-                            end
-                        end
-                    end
-
-                    applyFestivalDancePose(savedSelfMotors, cycleElapsed, 0)
-                    for _, item in ipairs(lineupEntries) do
-                        applyFestivalDancePose(item.motors, cycleElapsed, item.phaseOffset)
-                    end
+                waitElapsed = waitElapsed + dt
+                local gentleSway = math.sin(waitElapsed * 2.4) * 0.08
+                if activeSelfKrathongModel then
+                    applyCeremonyPose(savedSelfMotors, 0.22 + gentleSway * 0.4, 0)
+                    positionKrathongInHands(activeSelfKrathongModel, myChar, 0.22, 0, gentleSway)
                 end
-
-                -- จบ 1 รอบความยาวเพลงแล้ว วนซ้ำรอบใหม่ต่อเนื่อง
-                if cycleElapsed >= songLen then
-                    break
+                for _, d in ipairs(dancers) do
+                    applyCeremonyPose(d.motors, 0.22 + gentleSway * 0.4, 0)
+                    positionKrathongInHands(d.krathong, d.model, 0.22, 0, gentleSway)
                 end
             end
 
-            -- เคลียร์กระทงเก่าที่ลอยไปไกลแล้วเพื่อลดแลคก่อนเริ่มรอบเพลงถัดไป
+            if not isRunning or sessionToken ~= currentToken then
+                return
+            end
+
+            -- 2) ทุกคนปล่อยกระทงลงทะเลทันทีพร้อมกัน
+            setCameraFocus("krathong_release", anchorCf, nil, #dancers)
+            local releaseDoneCount = 0
+            local totalToRelease = #dancers + (activeSelfKrathongModel and 1 or 0)
+
+            if activeSelfKrathongModel then
+                local selfK = activeSelfKrathongModel
+                activeSelfKrathongModel = nil
+                task.spawn(function()
+                    playSlowKrathongAnimation(myChar, savedSelfMotors, selfK, oceanSurfaceY, folder, currentToken)
+                    releaseDoneCount = releaseDoneCount + 1
+                end)
+            end
+
+            for _, d in ipairs(dancers) do
+                local k = d.krathong
+                d.krathong = nil
+                task.spawn(function()
+                    if k then
+                        playSlowKrathongAnimation(d.model, d.motors, k, oceanSurfaceY, folder, currentToken)
+                    end
+                    releaseDoneCount = releaseDoneCount + 1
+                end)
+            end
+
+            while releaseDoneCount < totalToRelease and isRunning and sessionToken == currentToken do
+                RunService.Heartbeat:Wait()
+            end
+
+            if not isRunning or sessionToken ~= currentToken then
+                return
+            end
+
+            -- 3) มุมกล้องไปหาแต่ละตัวละครทีละคน คนละ 3 วิ + สุ่มท่าเต้นเต็มตัวหลากหลายคนละหลายๆ ที
+            for _, d in ipairs(dancers) do
+                d.danceStyle = math.random(1, 6)
+            end
+            spotlightQueue[#spotlightQueue].danceStyle = math.random(1, 6)
+
+            local globalDanceClock = 0
+            for _, targetDancer in ipairs(spotlightQueue) do
+                if not isRunning or sessionToken ~= currentToken then
+                    return
+                end
+
+                -- สุ่มเปลี่ยนท่าเต้นใหม่ให้คนนี้เด่นๆ และสลับอีกท่ากลางช่วงเพื่อเต้นหลายๆ ท่า
+                targetDancer.danceStyle = math.random(1, 6)
+                local secondComboStyle = ((targetDancer.danceStyle + math.random(1, 4) - 1) % 6) + 1
+                local switchedCombo = false
+
+                setCameraFocus("spotlight_person", anchorCf, targetDancer.model, #dancers)
+
+                local spotElapsed = 0
+                while spotElapsed < CONFIG.SpotlightPerPersonSec and isRunning and sessionToken == currentToken do
+                    local dt = RunService.RenderStepped:Wait()
+                    spotElapsed = spotElapsed + dt
+                    globalDanceClock = globalDanceClock + dt
+
+                    if not switchedCombo and spotElapsed >= (CONFIG.SpotlightPerPersonSec * 0.5) then
+                        switchedCombo = true
+                        targetDancer.danceStyle = secondComboStyle
+                    end
+
+                    -- ตัวเราและทุกคนเต้นท่าแตกต่างกันแยกจากกันตลอดเวลา
+                    local selfEntry = spotlightQueue[#spotlightQueue]
+                    applyUniqueFullBodyDance(savedSelfMotors, selfEntry.danceStyle, globalDanceClock, 0)
+                    for _, d in ipairs(dancers) do
+                        applyUniqueFullBodyDance(d.motors, d.danceStyle, globalDanceClock, d.phaseOffset)
+                    end
+                end
+            end
+
+            -- ล้างกระทงเก่าที่ลอยไกลก่อนวนกลับรอบลอยกระทงใหม่
             for _, child in ipairs(folder:GetChildren()) do
-                if child:IsA("Model") and (child.Name:find("Krathong_") or child.Name:find("FinaleKrathong_")) then
+                if child:IsA("Model") and child.Name:find("Krathong_") then
                     child:Destroy()
                 end
             end
@@ -1364,7 +1375,7 @@ local function startFestivalLoop(currentToken)
 end
 
 -- =========================================================
--- ปุ่มลอยขนาดเล็ก (Draggable Floating Toggle Button)
+-- สร้างเมนูเปิด-ปิดมีอนิเมชั่น (ใส่ชื่อ Roblox ทั่วโลก, ปุ่มเขียวดึงแล้ว, ปุ่มฟ้า +, รันทันที)
 -- =========================================================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = GUI_NAME
@@ -1372,50 +1383,443 @@ screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = guiParent
 
-local toggleBtn = Instance.new("TextButton")
-toggleBtn.Name = "KrathongToggleButton"
-toggleBtn.Size = UDim2.fromOffset(CONFIG.ButtonSizePx + 78, CONFIG.ButtonSizePx)
-toggleBtn.Position = UDim2.new(0.03, 0, 0.35, 0)
-toggleBtn.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
-toggleBtn.BorderSizePixel = 0
-toggleBtn.AutoButtonColor = false
-toggleBtn.Font = Enum.Font.GothamBold
-toggleBtn.TextSize = 13
-toggleBtn.TextColor3 = Color3.fromRGB(248, 250, 252)
-toggleBtn.Text = "กระทง: ปิด"
-toggleBtn.Parent = screenGui
+-- ปุ่มลอยสำหรับเปิด-ปิดเมนู
+local menuToggleBtn = Instance.new("TextButton")
+menuToggleBtn.Name = "MenuToggleButton"
+menuToggleBtn.Size = UDim2.fromOffset(148, CONFIG.ButtonSizePx)
+menuToggleBtn.Position = UDim2.new(0.025, 0, 0.22, 0)
+menuToggleBtn.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
+menuToggleBtn.BorderSizePixel = 0
+menuToggleBtn.AutoButtonColor = false
+menuToggleBtn.Font = Enum.Font.GothamBold
+menuToggleBtn.TextSize = 13
+menuToggleBtn.TextColor3 = Color3.fromRGB(248, 250, 252)
+menuToggleBtn.Text = "เมนูลอยกระทง"
+menuToggleBtn.Parent = screenGui
 
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 14)
-corner.Parent = toggleBtn
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 12)
+toggleCorner.Parent = menuToggleBtn
 
-local stroke = Instance.new("UIStroke")
-stroke.Thickness = 1.6
-stroke.Color = Color3.fromRGB(71, 85, 105)
-stroke.Parent = toggleBtn
+local toggleStroke = Instance.new("UIStroke")
+toggleStroke.Thickness = 1.5
+toggleStroke.Color = Color3.fromRGB(245, 158, 11)
+toggleStroke.Parent = menuToggleBtn
 
-local function updateButtonVisual()
-    if isEnabled then
-        toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 83, 9)
-        stroke.Color = Color3.fromRGB(251, 191, 36)
-        toggleBtn.Text = "กระทง: เปิด"
+-- หน้าต่างเมนูหลัก (มีอนิเมชั่นขยาย/หด)
+local menuFrame = Instance.new("Frame")
+menuFrame.Name = "MainInviteMenu"
+menuFrame.Size = UDim2.fromOffset(390, 420)
+menuFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+menuFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+menuFrame.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
+menuFrame.BorderSizePixel = 0
+menuFrame.ClipsDescendants = true
+menuFrame.Parent = screenGui
+
+local menuCorner = Instance.new("UICorner")
+menuCorner.CornerRadius = UDim.new(0, 14)
+menuCorner.Parent = menuFrame
+
+local menuStroke = Instance.new("UIStroke")
+menuStroke.Thickness = 1.5
+menuStroke.Color = Color3.fromRGB(51, 65, 85)
+menuStroke.Parent = menuFrame
+
+local menuScale = Instance.new("UIScale")
+menuScale.Scale = 1
+menuScale.Parent = menuFrame
+
+-- ส่วนหัวเมนู
+local headerBar = Instance.new("Frame")
+headerBar.Size = UDim2.new(1, 0, 0, 48)
+headerBar.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
+headerBar.BorderSizePixel = 0
+headerBar.Parent = menuFrame
+
+local headerTitle = Instance.new("TextLabel")
+headerTitle.Size = UDim2.new(1, -135, 1, 0)
+headerTitle.Position = UDim2.fromOffset(14, 0)
+headerTitle.BackgroundTransparency = 1
+headerTitle.Font = Enum.Font.GothamBold
+headerTitle.TextSize = 14
+headerTitle.TextXAlignment = Enum.TextXAlignment.Left
+headerTitle.TextColor3 = Color3.fromRGB(248, 250, 252)
+headerTitle.Text = "Loy Kratong Festival"
+headerTitle.Parent = headerBar
+
+local countLabel = Instance.new("TextLabel")
+countLabel.Size = UDim2.fromOffset(82, 48)
+countLabel.Position = UDim2.new(1, -124, 0, 0)
+countLabel.BackgroundTransparency = 1
+countLabel.Font = Enum.Font.GothamMedium
+countLabel.TextSize = 12
+countLabel.TextXAlignment = Enum.TextXAlignment.Right
+countLabel.TextColor3 = Color3.fromRGB(251, 191, 36)
+countLabel.Text = "ดึงแล้ว 0 คน"
+countLabel.Parent = headerBar
+
+local closeMenuBtn = Instance.new("TextButton")
+closeMenuBtn.Size = UDim2.fromOffset(30, 30)
+closeMenuBtn.Position = UDim2.new(1, -38, 0.5, -15)
+closeMenuBtn.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+closeMenuBtn.BorderSizePixel = 0
+closeMenuBtn.Font = Enum.Font.GothamBold
+closeMenuBtn.TextSize = 14
+closeMenuBtn.TextColor3 = Color3.fromRGB(226, 232, 240)
+closeMenuBtn.Text = "×"
+closeMenuBtn.Parent = headerBar
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 8)
+closeCorner.Parent = closeMenuBtn
+
+-- คำอธิบายสั้นด้านบน
+local subNote = Instance.new("TextLabel")
+subNote.Size = UDim2.new(1, -28, 0, 26)
+subNote.Position = UDim2.fromOffset(14, 52)
+subNote.BackgroundTransparency = 1
+subNote.Font = Enum.Font.Gotham
+subNote.TextSize = 11
+subNote.TextXAlignment = Enum.TextXAlignment.Left
+subNote.TextColor3 = Color3.fromRGB(148, 163, 184)
+subNote.Text = "ใส่ชื่อ Roblox ใครก็ได้ในโลก · กดปุ่มเขียวเพื่อดึง · กด + สีฟ้าเพื่อเพิ่มคน"
+subNote.Parent = menuFrame
+
+-- ScrollingFrame สำหรับเพิ่มรายชื่อ 100 - 1,000+ คนได้ไม่จำกัด
+local listScroll = Instance.new("ScrollingFrame")
+listScroll.Size = UDim2.new(1, -24, 1, -148)
+listScroll.Position = UDim2.fromOffset(12, 82)
+listScroll.BackgroundColor3 = Color3.fromRGB(11, 17, 32)
+listScroll.BorderSizePixel = 0
+listScroll.ScrollBarThickness = 5
+listScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 116, 139)
+listScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+listScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+listScroll.Parent = menuFrame
+
+local scrollCorner = Instance.new("UICorner")
+scrollCorner.CornerRadius = UDim.new(0, 10)
+scrollCorner.Parent = listScroll
+
+local listPadding = Instance.new("UIPadding")
+listPadding.PaddingTop = UDim.new(0, 8)
+listPadding.PaddingBottom = UDim.new(0, 8)
+listPadding.PaddingLeft = UDim.new(0, 8)
+listPadding.PaddingRight = UDim.new(0, 8)
+listPadding.Parent = listScroll
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 6)
+listLayout.Parent = listScroll
+
+-- แถบปุ่มด้านล่าง: รันทันที / หยุด
+local footerBar = Instance.new("Frame")
+footerBar.Size = UDim2.new(1, -24, 0, 48)
+footerBar.Position = UDim2.new(0, 12, 1, -56)
+footerBar.BackgroundTransparency = 1
+footerBar.Parent = menuFrame
+
+local runBtn = Instance.new("TextButton")
+runBtn.Size = UDim2.new(0.64, -4, 1, 0)
+runBtn.Position = UDim2.fromOffset(0, 0)
+runBtn.BackgroundColor3 = Color3.fromRGB(217, 119, 6)
+runBtn.BorderSizePixel = 0
+runBtn.Font = Enum.Font.GothamBold
+runBtn.TextSize = 14
+runBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+runBtn.Text = "รันทันที"
+runBtn.Parent = footerBar
+
+local runCorner = Instance.new("UICorner")
+runCorner.CornerRadius = UDim.new(0, 10)
+runCorner.Parent = runBtn
+
+local stopBtn = Instance.new("TextButton")
+stopBtn.Size = UDim2.new(0.36, -4, 1, 0)
+stopBtn.Position = UDim2.new(0.64, 4, 0, 0)
+stopBtn.BackgroundColor3 = Color3.fromRGB(51, 65, 85)
+stopBtn.BorderSizePixel = 0
+stopBtn.Font = Enum.Font.GothamBold
+stopBtn.TextSize = 13
+stopBtn.TextColor3 = Color3.fromRGB(241, 245, 249)
+stopBtn.Text = "หยุดงาน"
+stopBtn.Parent = footerBar
+
+local stopCorner = Instance.new("UICorner")
+stopCorner.CornerRadius = UDim.new(0, 10)
+stopCorner.Parent = stopBtn
+
+local function updatePulledCounter()
+    local pulledCount = 0
+    for _, r in ipairs(inviteRows) do
+        if r.pulledData then
+            pulledCount = pulledCount + 1
+        end
+    end
+    countLabel.Text = "ดึงแล้ว " .. pulledCount .. " คน"
+end
+
+-- ฟังก์ชันอนิเมชั่นเปิด-ปิดเมนู
+local function setMenuVisibleAnimated(show)
+    isMenuOpen = show
+    if show then
+        menuFrame.Visible = true
+        menuScale.Scale = 0.82
+        menuFrame.BackgroundTransparency = 0.35
+        TweenService:Create(
+            menuScale,
+            TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+            { Scale = 1 }
+        ):Play()
+        TweenService:Create(
+            menuFrame,
+            TweenInfo.new(0.24, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { BackgroundTransparency = 0 }
+        ):Play()
     else
-        toggleBtn.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
-        stroke.Color = Color3.fromRGB(71, 85, 105)
-        toggleBtn.Text = "กระทง: ปิด"
+        local shrinkTween = TweenService:Create(
+            menuScale,
+            TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            { Scale = 0.82 }
+        )
+        TweenService:Create(
+            menuFrame,
+            TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            { BackgroundTransparency = 0.45 }
+        ):Play()
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function()
+            if not isMenuOpen then
+                menuFrame.Visible = false
+            end
+        end)
     end
 end
 
+-- ฟังก์ชันสร้างแถวใส่ชื่อคน Roblox (ปุ่มเขียว + ปุ่ม + สีฟ้า)
+local function addInviteRow(defaultText)
+    nextRowId = nextRowId + 1
+    local rowId = nextRowId
+
+    local rowFrame = Instance.new("Frame")
+    rowFrame.Name = "InviteRow_" .. rowId
+    rowFrame.Size = UDim2.new(1, 0, 0, 38)
+    rowFrame.LayoutOrder = rowId
+    rowFrame.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
+    rowFrame.BorderSizePixel = 0
+    rowFrame.Parent = listScroll
+
+    local rCorner = Instance.new("UICorner")
+    rCorner.CornerRadius = UDim.new(0, 8)
+    rCorner.Parent = rowFrame
+
+    local nameBox = Instance.new("TextBox")
+    nameBox.Size = UDim2.new(1, -148, 1, -6)
+    nameBox.Position = UDim2.fromOffset(6, 3)
+    nameBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+    nameBox.BorderSizePixel = 0
+    nameBox.ClearTextOnFocus = false
+    nameBox.Font = Enum.Font.Gotham
+    nameBox.TextSize = 12
+    nameBox.TextXAlignment = Enum.TextXAlignment.Left
+    nameBox.TextColor3 = Color3.fromRGB(248, 250, 252)
+    nameBox.PlaceholderColor3 = Color3.fromRGB(100, 116, 139)
+    nameBox.PlaceholderText = "พิมพ์ชื่อ Roblox..."
+    nameBox.Text = defaultText or ""
+    nameBox.Parent = rowFrame
+
+    local boxPad = Instance.new("UIPadding")
+    boxPad.PaddingLeft = UDim.new(0, 8)
+    boxPad.PaddingRight = UDim.new(0, 6)
+    boxPad.Parent = nameBox
+
+    local boxCorner = Instance.new("UICorner")
+    boxCorner.CornerRadius = UDim.new(0, 6)
+    boxCorner.Parent = nameBox
+
+    -- ปุ่มสีเขียว (กดเพื่อดึง -> เปลี่ยนเป็น "ดึงแล้ว")
+    local pullBtn = Instance.new("TextButton")
+    pullBtn.Size = UDim2.fromOffset(68, 30)
+    pullBtn.Position = UDim2.new(1, -136, 0.5, -15)
+    pullBtn.BackgroundColor3 = Color3.fromRGB(22, 163, 74)
+    pullBtn.BorderSizePixel = 0
+    pullBtn.Font = Enum.Font.GothamBold
+    pullBtn.TextSize = 11
+    pullBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    pullBtn.Text = "ดึงตัว"
+    pullBtn.Parent = rowFrame
+
+    local pullCorner = Instance.new("UICorner")
+    pullCorner.CornerRadius = UDim.new(0, 6)
+    pullCorner.Parent = pullBtn
+
+    -- ปุ่มเครื่องหมายบวกสีฟ้า (+) เพิ่มคนถัดไปได้ไม่จำกัด
+    local addPlusBtn = Instance.new("TextButton")
+    addPlusBtn.Size = UDim2.fromOffset(30, 30)
+    addPlusBtn.Position = UDim2.new(1, -64, 0.5, -15)
+    addPlusBtn.BackgroundColor3 = Color3.fromRGB(37, 99, 235)
+    addPlusBtn.BorderSizePixel = 0
+    addPlusBtn.Font = Enum.Font.GothamBold
+    addPlusBtn.TextSize = 16
+    addPlusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    addPlusBtn.Text = "+"
+    addPlusBtn.Parent = rowFrame
+
+    local plusCorner = Instance.new("UICorner")
+    plusCorner.CornerRadius = UDim.new(0, 6)
+    plusCorner.Parent = addPlusBtn
+
+    -- ปุ่มลบแถวเล็กๆ
+    local removeBtn = Instance.new("TextButton")
+    removeBtn.Size = UDim2.fromOffset(26, 30)
+    removeBtn.Position = UDim2.new(1, -30, 0.5, -15)
+    removeBtn.BackgroundColor3 = Color3.fromRGB(51, 65, 85)
+    removeBtn.BorderSizePixel = 0
+    removeBtn.Font = Enum.Font.GothamBold
+    removeBtn.TextSize = 12
+    removeBtn.TextColor3 = Color3.fromRGB(203, 213, 225)
+    removeBtn.Text = "×"
+    removeBtn.Parent = rowFrame
+
+    local remCorner = Instance.new("UICorner")
+    remCorner.CornerRadius = UDim.new(0, 6)
+    remCorner.Parent = removeBtn
+
+    local rowEntry = {
+        rowId = rowId,
+        frame = rowFrame,
+        nameBox = nameBox,
+        pullBtn = pullBtn,
+        status = "idle",
+        pulledData = nil,
+    }
+    table.insert(inviteRows, rowEntry)
+
+    nameBox:GetPropertyChangedSignal("Text"):Connect(function()
+        rowEntry.pulledData = nil
+        rowEntry.status = "idle"
+        pullBtn.Text = "ดึงตัว"
+        pullBtn.BackgroundColor3 = Color3.fromRGB(22, 163, 74)
+        updatePulledCounter()
+    end)
+
+    pullBtn.MouseButton1Click:Connect(function()
+        if rowEntry.status == "loading" then
+            return
+        end
+        rowEntry.status = "loading"
+        pullBtn.Text = "กำลังดึง..."
+        pullBtn.BackgroundColor3 = Color3.fromRGB(202, 138, 4)
+
+        task.spawn(function()
+            local data, err = fetchRobloxUserAvatar(nameBox.Text)
+            if data then
+                rowEntry.pulledData = data
+                rowEntry.status = "pulled"
+                nameBox.Text = data.username
+                pullBtn.Text = "ดึงแล้ว"
+                pullBtn.BackgroundColor3 = Color3.fromRGB(21, 128, 61)
+            else
+                rowEntry.pulledData = nil
+                rowEntry.status = "error"
+                pullBtn.Text = err or "ไม่พบชื่อ"
+                pullBtn.BackgroundColor3 = Color3.fromRGB(185, 28, 28)
+            end
+            updatePulledCounter()
+        end)
+    end)
+
+    addPlusBtn.MouseButton1Click:Connect(function()
+        addInviteRow("")
+    end)
+
+    removeBtn.MouseButton1Click:Connect(function()
+        if #inviteRows <= 1 then
+            nameBox.Text = ""
+            rowEntry.pulledData = nil
+            rowEntry.status = "idle"
+            pullBtn.Text = "ดึงตัว"
+            pullBtn.BackgroundColor3 = Color3.fromRGB(22, 163, 74)
+            updatePulledCounter()
+            return
+        end
+        for i, item in ipairs(inviteRows) do
+            if item.rowId == rowId then
+                table.remove(inviteRows, i)
+                break
+            end
+        end
+        rowFrame:Destroy()
+        updatePulledCounter()
+    end)
+end
+
+-- สร้างแถวเริ่มต้นในเมนู
+if #CONFIG.InitialUsernames > 0 then
+    for _, uname in ipairs(CONFIG.InitialUsernames) do
+        addInviteRow(uname)
+    end
+else
+    addInviteRow("")
+end
+
+-- ปุ่มรันทันที & ปุ่มหยุด
+local function updateRunStatusVisual()
+    if isRunning then
+        runBtn.Text = "กำลังทำงาน..."
+        runBtn.BackgroundColor3 = Color3.fromRGB(21, 128, 61)
+        stopBtn.BackgroundColor3 = Color3.fromRGB(185, 28, 28)
+        menuToggleBtn.Text = "เมนู (กำลังรัน)"
+        toggleStroke.Color = Color3.fromRGB(34, 197, 94)
+    else
+        runBtn.Text = "รันทันที"
+        runBtn.BackgroundColor3 = Color3.fromRGB(217, 119, 6)
+        stopBtn.BackgroundColor3 = Color3.fromRGB(51, 65, 85)
+        menuToggleBtn.Text = "เมนูลอยกระทง"
+        toggleStroke.Color = Color3.fromRGB(245, 158, 11)
+    end
+end
+
+runBtn.MouseButton1Click:Connect(function()
+    if isRunning then
+        sessionToken = sessionToken + 1
+        clearFestivalScene()
+    end
+    isRunning = true
+    sessionToken = sessionToken + 1
+    updateRunStatusVisual()
+
+    if CONFIG.AutoCollapseOnRun then
+        setMenuVisibleAnimated(false)
+    end
+
+    startFestivalShow(sessionToken)
+end)
+
+stopBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    sessionToken = sessionToken + 1
+    clearFestivalScene()
+    updateRunStatusVisual()
+end)
+
+closeMenuBtn.MouseButton1Click:Connect(function()
+    setMenuVisibleAnimated(false)
+end)
+
+-- ลากปุ่มเปิด-ปิดเมนูได้ทั้งเมาส์และทัชสกรีน
 local dragging = false
 local dragStart = nil
 local startPos = nil
 local movedDistance = 0
 
-toggleBtn.InputBegan:Connect(function(input)
+menuToggleBtn.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true
         dragStart = input.Position
-        startPos = toggleBtn.Position
+        startPos = menuToggleBtn.Position
         movedDistance = 0
     end
 end)
@@ -1424,7 +1828,7 @@ UserInputService.InputChanged:Connect(function(input)
     if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
         movedDistance = delta.Magnitude
-        toggleBtn.Position = UDim2.new(
+        menuToggleBtn.Position = UDim2.new(
             startPos.X.Scale,
             startPos.X.Offset + delta.X,
             startPos.Y.Scale,
@@ -1438,17 +1842,12 @@ UserInputService.InputEnded:Connect(function(input)
         if dragging then
             dragging = false
             if movedDistance < 6 then
-                isEnabled = not isEnabled
-                sessionToken = sessionToken + 1
-                updateButtonVisual()
-                if isEnabled then
-                    startFestivalLoop(sessionToken)
-                else
-                    clearAllIllusions()
-                end
+                setMenuVisibleAnimated(not isMenuOpen)
             end
         end
     end
 end)
 
-updateButtonVisual()
+-- เปิดเมนูด้วยอนิเมชั่นทันทีตอนรันสคริปต์
+setMenuVisibleAnimated(true)
+updateRunStatusVisual()
