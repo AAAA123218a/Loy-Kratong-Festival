@@ -2,10 +2,10 @@
     Loy Kratong Festival - Client-Side Illusion Script
     ทำงานเฉพาะฝั่ง Client (เห็นคนเดียวในหน้าจอเรา ไม่กระทบเซิร์ฟเวอร์)
     1. ปุ่มลอยขนาดเล็ก ลากย้ายได้ กดเปิด-ปิดได้ทันที
-    2. เมื่อเปิด: ล็อกตัวเราห้ามขยับ
-    3. เฟส 1: ทุกคนยกเว้นเรากองรวมตายรัวๆ ด้านหลังเรา (หรือสุ่มทั่วแมพ) เกิดใหม่รีเซ็ตเลือด
-    4. เฟส 2: ทุกคนเกิดใหม่เลือดเต็ม 100% วาปมาเรียงแถวหน้ากระดานแถวเดียวกับเรา ถือกระทงสมจริง
-             พร้อมเสกทะเลขนาดใหญ่ด้านหน้าเรารอ 3 วินาที
+    2. เมื่อเปิด: ล็อกตัวเราห้ามขยับ + เล่นเพลงประกอบวนซ้ำ + มุมกล้องถ่ายคลิปตามฉาก
+    3. เฟส 1: ทุกคนยกเว้นเรากองรวมตายรัวๆ ด้านหลังเรา เกิดใหม่รีเซ็ตเลือด
+    4. เฟส 2: ทุกคนเกิดใหม่เลือดเต็ม 100% วาปเรียงแถวหน้ากระดานแถวเดียวกับเรา (รองรับทั้ง R6/R15 ไม่จมพื้น)
+             ถือกระทงตั้งตรงสมจริง + เสกทะเลขนาดใหญ่ด้านหน้าเรารอ 3 วินาที
     5. เฟส 3: ตัวเราเล่นอนิเมชั่นค่อยๆ ลอยกระทงสมจริง และอีก 2 วินาทีทุกคนทำตามพร้อมกันหมด
 ]]
 
@@ -14,22 +14,27 @@ local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local SoundService = game:GetService("SoundService")
 
 local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
-    DeathLocationMode = "behind_pile", -- "behind_pile" หรือ "random_map"
+    DeathLocationMode = "behind_pile",
     DeathBurstCount = 5,
     DeathIntervalSec = 0.32,
     LineupSpacing = 4.5,
     OceanWaitSec = 3,
     GroupFollowDelaySec = 2,
-    FloatWatchSec = 4,
+    FloatWatchSec = 4.5,
     OceanWidth = 320,
     OceanLength = 220,
     FreezeLocalPlayer = true,
     GiveSelfKrathong = true,
     HideRealPlayers = true,
+    EnableCinematicCamera = true,
+    EnableMusic = true,
+    MusicUrl = "https://github.com/objwghd-maker/Loy-Kratong-Festival/raw/refs/heads/main/s4umusic--424040.mp3",
+    MusicVolume = 0.75,
     SoloFallbackClones = 5,
     LoopCycle = true,
     ButtonSizePx = 54,
@@ -37,6 +42,7 @@ local CONFIG = {
 
 local GUI_NAME = "LoyKratongFestival_ToggleGui"
 local FOLDER_NAME = "__LoyKratongFestival_Client"
+local MUSIC_FILE = "LoyKratongFestival_BGM.mp3"
 
 local function getGuiParent()
     if type(gethui) == "function" then
@@ -70,10 +76,19 @@ local sessionToken = 0
 local illusionFolder = nil
 local hideConnection = nil
 local freezeConnection = nil
+local cameraConnection = nil
 local savedDisplayTypes = {}
 local savedPlayerState = nil
+local savedCameraState = nil
 local savedSelfMotors = {}
+local cachedHealthyAppearances = {}
 local activeSelfKrathongModel = nil
+local activeSound = nil
+local cachedAudioAsset = nil
+local currentCamPhase = "idle"
+local currentCamAnchor = CFrame.identity
+local currentLineupCount = 4
+local camPhaseClock = 0
 
 local function ensureIllusionFolder()
     if illusionFolder and illusionFolder.Parent then
@@ -84,6 +99,182 @@ local function ensureIllusionFolder()
     folder.Parent = Workspace
     illusionFolder = folder
     return folder
+end
+
+-- =========================================================
+-- ระบบเพลงประกอบวนซ้ำจากไฟล์ MP3 (เล่นตอนเปิด / หยุดทันทีตอนปิด)
+-- =========================================================
+local function resolveAudioAsset()
+    if cachedAudioAsset then
+        return cachedAudioAsset
+    end
+
+    local getAsset = (type(getcustomasset) == "function" and getcustomasset)
+        or (type(getsynasset) == "function" and getsynasset)
+
+    if not getAsset or type(writefile) ~= "function" then
+        return nil
+    end
+
+    local okGet, audioBytes = pcall(function()
+        return game:HttpGet(CONFIG.MusicUrl)
+    end)
+    if not okGet or type(audioBytes) ~= "string" or #audioBytes < 128 then
+        return nil
+    end
+
+    local okWrite = pcall(function()
+        writefile(MUSIC_FILE, audioBytes)
+    end)
+    if not okWrite then
+        return nil
+    end
+
+    local okAsset, assetUri = pcall(getAsset, MUSIC_FILE)
+    if okAsset and type(assetUri) == "string" and assetUri ~= "" then
+        cachedAudioAsset = assetUri
+        return cachedAudioAsset
+    end
+
+    return nil
+end
+
+local function stopBackgroundMusic()
+    if activeSound then
+        pcall(function()
+            activeSound:Stop()
+            activeSound:Destroy()
+        end)
+        activeSound = nil
+    end
+end
+
+local function startBackgroundMusic(currentToken)
+    stopBackgroundMusic()
+    if not CONFIG.EnableMusic then
+        return
+    end
+
+    task.spawn(function()
+        local assetId = resolveAudioAsset()
+        if not assetId or not isEnabled or sessionToken ~= currentToken then
+            return
+        end
+
+        local sound = Instance.new("Sound")
+        sound.Name = "LoyKratongFestival_BGM"
+        sound.SoundId = assetId
+        sound.Looped = true
+        sound.Volume = CONFIG.MusicVolume
+        sound.Parent = SoundService
+        activeSound = sound
+        pcall(function()
+            sound:Play()
+        end)
+    end)
+end
+
+-- =========================================================
+-- ระบบมุมกล้องถ่ายคลิปอัตโนมัติตามฉาก (คืนกล้องปกติเมื่อกดปิด)
+-- =========================================================
+local function setCameraStage(phaseName, anchorCf, lineupCount)
+    currentCamPhase = phaseName
+    if anchorCf then
+        currentCamAnchor = anchorCf
+    end
+    if lineupCount then
+        currentLineupCount = lineupCount
+    end
+    camPhaseClock = 0
+end
+
+local function setCinematicCameraEnabled(enabled)
+    if cameraConnection then
+        cameraConnection:Disconnect()
+        cameraConnection = nil
+    end
+
+    local cam = Workspace.CurrentCamera
+    if not cam then
+        return
+    end
+
+    if not enabled then
+        if savedCameraState then
+            cam.CameraType = savedCameraState.CameraType
+            cam.FieldOfView = savedCameraState.FieldOfView
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            cam.CameraSubject = hum or savedCameraState.CameraSubject
+            savedCameraState = nil
+        else
+            cam.CameraType = Enum.CameraType.Custom
+        end
+        return
+    end
+
+    if not CONFIG.EnableCinematicCamera then
+        return
+    end
+
+    if not savedCameraState then
+        savedCameraState = {
+            CameraType = cam.CameraType,
+            CameraSubject = cam.CameraSubject,
+            FieldOfView = cam.FieldOfView,
+        }
+    end
+
+    cam.CameraType = Enum.CameraType.Scriptable
+
+    cameraConnection = RunService.RenderStepped:Connect(function(dt)
+        if not isEnabled or not CONFIG.EnableCinematicCamera then
+            return
+        end
+        local activeCam = Workspace.CurrentCamera
+        if not activeCam then
+            return
+        end
+        if activeCam.CameraType ~= Enum.CameraType.Scriptable then
+            activeCam.CameraType = Enum.CameraType.Scriptable
+        end
+
+        camPhaseClock = camPhaseClock + dt
+        local baseCf = currentCamAnchor
+        local halfSpan = math.max(1, math.ceil(currentLineupCount / 2)) * CONFIG.LineupSpacing
+        local targetCf = activeCam.CFrame
+        local targetFov = 60
+
+        if currentCamPhase == "phase1_pile" then
+            local sway = math.sin(camPhaseClock * 0.9) * 2.2
+            local camPos = (baseCf * CFrame.new(11 + sway, 8.2, -10.5)).Position
+            local lookAt = (baseCf * CFrame.new(0, 1.6, 5.5)).Position
+            targetCf = CFrame.lookAt(camPos, lookAt)
+            targetFov = 66
+        elseif currentCamPhase == "phase2_lineup_ocean" then
+            local panX = math.sin(camPhaseClock * 0.55) * math.min(7, halfSpan * 0.45)
+            local distZ = math.max(20, 14 + halfSpan * 0.85)
+            local camPos = (baseCf * CFrame.new(panX, 7.2, -distZ)).Position
+            local lookAt = (baseCf * CFrame.new(0, 2.0, -1.5)).Position
+            targetCf = CFrame.lookAt(camPos, lookAt)
+            targetFov = 58
+        elseif currentCamPhase == "phase3_self_focus" then
+            local camPos = (baseCf * CFrame.new(-3.4, 3.0, -7.2)).Position
+            local lookAt = (baseCf * CFrame.new(0, 1.2, -1.4)).Position
+            targetCf = CFrame.lookAt(camPos, lookAt)
+            targetFov = 50
+        elseif currentCamPhase == "phase3_group_wide" then
+            local riseY = 8.8 + math.min(3.5, camPhaseClock * 0.45)
+            local distZ = math.max(24, 18 + halfSpan * 0.95)
+            local camPos = (baseCf * CFrame.new(math.sin(camPhaseClock * 0.4) * 3.5, riseY, -distZ)).Position
+            local lookAt = (baseCf * CFrame.new(0, 1.2, -6.5)).Position
+            targetCf = CFrame.lookAt(camPos, lookAt)
+            targetFov = 64
+        end
+
+        local alpha = math.clamp(dt * 3.6, 0, 1)
+        activeCam.CFrame = activeCam.CFrame:Lerp(targetCf, alpha)
+        activeCam.FieldOfView = activeCam.FieldOfView + (targetFov - activeCam.FieldOfView) * alpha
+    end)
 end
 
 -- =========================================================
@@ -215,24 +406,23 @@ local function setRealPlayersHidden(hidden)
 end
 
 -- =========================================================
--- สร้างโมเดลกระทงไทยสมจริง (ใบตอง 2 ชั้น, ดอกบัว, ดาวเรือง, ธูปควัน, เทียนสว่าง)
+-- สร้างโมเดลกระทงไทยสมจริง (ใช้ PivotPart ตั้งตรง ไม่ตะแคงผิดด้าน!)
 -- =========================================================
 local function createRealisticKrathongModel(modelName)
     local model = Instance.new("Model")
     model.Name = modelName or "RealisticKrathong"
 
-    local base = Instance.new("Part")
-    base.Name = "Base"
-    base.Shape = Enum.PartType.Cylinder
-    base.Size = Vector3.new(0.42, 1.55, 1.55)
-    base.Color = Color3.fromRGB(34, 84, 38)
-    base.Material = Enum.Material.SmoothPlastic
-    base.CanCollide = false
-    base.Anchored = true
-    base.Massless = true
-    base.CFrame = CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.rad(90))
-    base.Parent = model
-    model.PrimaryPart = base
+    -- จุดหมุนหลักมุม (0, 0, 0) เพื่อรักษาทุกชิ้นส่วนให้อยู่ในแนวตั้งตรงเสมอ
+    local pivot = Instance.new("Part")
+    pivot.Name = "PivotPart"
+    pivot.Size = Vector3.new(0.2, 0.2, 0.2)
+    pivot.Transparency = 1
+    pivot.CanCollide = false
+    pivot.Anchored = true
+    pivot.Massless = true
+    pivot.CFrame = CFrame.new(0, 0, 0)
+    pivot.Parent = model
+    model.PrimaryPart = pivot
 
     local function addPart(name, size, color, material, worldCf, shape)
         local p = Instance.new("Part")
@@ -250,6 +440,16 @@ local function createRealisticKrathongModel(modelName)
         p.Parent = model
         return p
     end
+
+    -- ฐานหยวกกล้วยทรงกระบอกแนวนอน (หมุนเฉพาะชิ้นฐาน ไม่กระทบ PrimaryPart)
+    addPart(
+        "Base",
+        Vector3.new(0.42, 1.55, 1.55),
+        Color3.fromRGB(34, 84, 38),
+        Enum.Material.SmoothPlastic,
+        CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.rad(90)),
+        Enum.PartType.Cylinder
+    )
 
     -- ไส้หยวกกล้วยด้านบน
     addPart(
@@ -275,7 +475,6 @@ local function createRealisticKrathongModel(modelName)
             Enum.Material.SmoothPlastic,
             cf
         )
-        -- ปลายกลีบใบตองแหลม
         local tipCf = CFrame.Angles(0, angle, 0)
             * CFrame.new(0, 0.42, 0.88)
             * CFrame.Angles(math.rad(-18), 0, math.rad(45))
@@ -364,7 +563,7 @@ local function createRealisticKrathongModel(modelName)
     fire.SecondaryColor = Color3.fromRGB(255, 100, 30)
     fire.Parent = flame
 
-    -- ธูป 3 ดอกพร้อมควันธูปลอยเบาๆ
+    -- ธูป 3 ดอกพร้อมควันธูปลอยจางๆ
     for i = -1, 1 do
         local incenseCf = CFrame.new(i * 0.09, 0.52, -0.13)
             * CFrame.Angles(math.rad(-10), 0, math.rad(i * 6))
@@ -428,7 +627,6 @@ local function restoreCharacterMotors(motors)
     end
 end
 
--- กำหนดมุมข้อต่อตามคีย์เฟรม: prayWeight (0..1), bendWeight (0..1)
 local function applyCeremonyPose(motors, prayWeight, bendWeight)
     local armRaise = prayWeight * 0.72 + bendWeight * 0.58
     local armInward = prayWeight * 0.36 + bendWeight * 0.25
@@ -458,29 +656,42 @@ local function applyCeremonyPose(motors, prayWeight, bendWeight)
     setAngle("RootJoint", CFrame.Angles(-torsoBend, 0, 0))
 end
 
--- คำนวณตำแหน่งกระทงให้อยู่ระหว่างมือทั้งสองข้างตรงหน้าตัวละคร
 local function positionKrathongInHands(krathongModel, char, prayWeight, bendWeight)
     if not krathongModel or not krathongModel.Parent or not char then
         return
     end
     local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then
+    local chest = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or root
+    if not root or not chest then
         return
     end
 
-    local forwardDist = 1.65 + (bendWeight * 1.35)
-    local heightOffset = 0.05 + (prayWeight * 0.55) - (bendWeight * 1.45)
+    local forwardDist = 1.6 + (bendWeight * 1.35)
+    local heightOffset = 0.05 + (prayWeight * 0.48) - (bendWeight * 1.45)
     local yawOnly = root.CFrame - root.CFrame.Position
-    local targetPos = (root.CFrame * CFrame.new(0, heightOffset, -forwardDist)).Position
+    local anchorRef = CFrame.new(chest.Position) * yawOnly
+    local targetPos = (anchorRef * CFrame.new(0, heightOffset, -forwardDist)).Position
     krathongModel:PivotTo(CFrame.new(targetPos) * yawOnly)
 end
 
 -- =========================================================
--- คำนวณความสูงพื้นจริงเพื่อไม่ให้ตัวละครจมพื้นหรือลอย
+-- คำนวณระยะจากพื้นถึงจุดกึ่งกลางตัวละคร (รองรับทั้ง R6 ที่ HipHeight=0 และ R15)
 -- =========================================================
+local function getRootOffsetFromFloor(char, hum, root)
+    if hum and hum.RigType == Enum.HumanoidRigType.R6 then
+        local leg = char:FindFirstChild("Left Leg") or char:FindFirstChild("Right Leg")
+        local legHeight = (leg and leg.Size.Y) or 2.0
+        return legHeight + (root.Size.Y * 0.5)
+    end
+    local hip = (hum and hum.HipHeight and hum.HipHeight > 0.1) and hum.HipHeight or 2.0
+    return hip + (root.Size.Y * 0.5)
+end
+
 local function getFloorY(referenceRoot, x, z)
-    local hum = referenceRoot.Parent and referenceRoot.Parent:FindFirstChildOfClass("Humanoid")
-    local fallbackFloor = referenceRoot.Position.Y - (referenceRoot.Size.Y * 0.5) - (hum and hum.HipHeight or 2)
+    local refChar = referenceRoot.Parent
+    local refHum = refChar and refChar:FindFirstChildOfClass("Humanoid")
+    local refOffset = getRootOffsetFromFloor(refChar, refHum, referenceRoot)
+    local fallbackFloor = referenceRoot.Position.Y - refOffset
 
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
@@ -504,33 +715,60 @@ local function getFloorY(referenceRoot, x, z)
 end
 
 -- =========================================================
--- สร้างโคลนตัวละครฝั่ง Client พร้อมรีเซ็ตเลือดเต็ม 100%
+-- เก็บต้นแบบตัวละครที่สมบูรณ์แข็งแรง (ป้องกันโคลนชิ้นส่วนขาดหรือตายค้าง)
 -- =========================================================
-local function spawnFreshClone(sourcePlayer, cloneLabel, targetPos, facingYawCFrame, anchoredRoot)
-    local sourceChar = sourcePlayer and sourcePlayer.Character
-    if not sourceChar then
+local function captureHealthyAppearance(player)
+    local char = player and player.Character
+    if not char then
         return nil
     end
-
-    local prevArch = sourceChar.Archivable
-    sourceChar.Archivable = true
-    local clone = sourceChar:Clone()
-    sourceChar.Archivable = prevArch
-    if not clone then
-        return nil
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    if not hum or hum.Health <= 0 or not root or not head then
+        return cachedHealthyAppearances[player.UserId]
     end
 
-    clone.Name = cloneLabel or (sourcePlayer.Name .. "_Illusion")
+    local prevArch = char.Archivable
+    char.Archivable = true
+    local template = char:Clone()
+    char.Archivable = prevArch
+    if not template then
+        return cachedHealthyAppearances[player.UserId]
+    end
 
-    for _, desc in ipairs(clone:GetDescendants()) do
+    for _, desc in ipairs(template:GetDescendants()) do
         if desc:IsA("Script") or desc:IsA("LocalScript") or desc:IsA("Tool") then
             desc:Destroy()
         elseif desc:IsA("BasePart") then
             desc.LocalTransparencyModifier = 0
             desc.CanCollide = false
             desc.Anchored = false
+            desc.AssemblyLinearVelocity = Vector3.zero
+            desc.AssemblyAngularVelocity = Vector3.zero
         end
     end
+
+    local oldCache = cachedHealthyAppearances[player.UserId]
+    if oldCache then
+        oldCache:Destroy()
+    end
+    cachedHealthyAppearances[player.UserId] = template
+    return template
+end
+
+local function spawnFreshClone(sourcePlayer, cloneLabel, targetPos, facingYawCFrame, anchoredRoot, allowDeath)
+    local template = captureHealthyAppearance(sourcePlayer)
+    if not template then
+        return nil
+    end
+
+    local clone = template:Clone()
+    if not clone then
+        return nil
+    end
+
+    clone.Name = cloneLabel or (sourcePlayer.Name .. "_Illusion")
 
     local hum = clone:FindFirstChildOfClass("Humanoid")
     local root = clone:FindFirstChild("HumanoidRootPart") or clone.PrimaryPart
@@ -540,16 +778,15 @@ local function spawnFreshClone(sourcePlayer, cloneLabel, targetPos, facingYawCFr
         hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOn
         hum.MaxHealth = 100
         hum.Health = 100
-        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, allowDeath == true)
     end
 
     local folder = ensureIllusionFolder()
     clone.Parent = folder
 
     if root and targetPos then
-        local hip = hum and hum.HipHeight or 2
-        local floorY = targetPos.Y
-        local exactRootY = floorY + hip + (root.Size.Y * 0.5)
+        local offsetFromFloor = getRootOffsetFromFloor(clone, hum, root)
+        local exactRootY = targetPos.Y + offsetFromFloor
         local finalCf = CFrame.new(targetPos.X, exactRootY, targetPos.Z) * (facingYawCFrame or CFrame.identity)
         clone:PivotTo(finalCf)
         if anchoredRoot then
@@ -563,15 +800,18 @@ end
 local function gatherTargetSources()
     local targets = {}
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-            table.insert(targets, {
-                player = player,
-                label = player.DisplayName,
-            })
+        if player ~= LocalPlayer then
+            if captureHealthyAppearance(player) then
+                table.insert(targets, {
+                    player = player,
+                    label = player.DisplayName,
+                })
+            end
         end
     end
 
     if #targets == 0 and CONFIG.SoloFallbackClones > 0 and LocalPlayer.Character then
+        captureHealthyAppearance(LocalPlayer)
         for i = 1, CONFIG.SoloFallbackClones do
             table.insert(targets, {
                 player = LocalPlayer,
@@ -593,6 +833,7 @@ local function killCloneIllusion(clone)
     end
     local hum = clone:FindFirstChildOfClass("Humanoid")
     if hum then
+        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
         hum.Health = 0
         pcall(function()
             hum:ChangeState(Enum.HumanoidStateType.Dead)
@@ -605,9 +846,9 @@ local function killCloneIllusion(clone)
         if part:IsA("BasePart") then
             part.CanCollide = true
             part.AssemblyLinearVelocity = Vector3.new(
-                math.random(-8, 8),
-                math.random(4, 11),
-                math.random(-8, 8)
+                math.random(-6, 6),
+                math.random(4, 9),
+                math.random(1, 7)
             )
         end
     end
@@ -626,7 +867,6 @@ local function spawnHugeOceanInFront(anchorRoot, folder)
     oceanModel.Name = "HugeLoyKrathongOcean"
     oceanModel.Parent = folder
 
-    -- ก้นทะเลสีน้ำเงินเข้ม
     local deepBed = Instance.new("Part")
     deepBed.Name = "OceanBed"
     deepBed.Size = Vector3.new(CONFIG.OceanWidth, 1.5, CONFIG.OceanLength)
@@ -637,7 +877,6 @@ local function spawnHugeOceanInFront(anchorRoot, folder)
     deepBed.CFrame = CFrame.new(oceanCenter.X, surfaceY - 1.1, oceanCenter.Z) * yawOnly
     deepBed.Parent = oceanModel
 
-    -- ผิวน้ำทะเลใสสะท้อนแสง
     local waterSurface = Instance.new("Part")
     waterSurface.Name = "OceanSurface"
     waterSurface.Size = Vector3.new(CONFIG.OceanWidth, 0.35, CONFIG.OceanLength)
@@ -650,7 +889,6 @@ local function spawnHugeOceanInFront(anchorRoot, folder)
     waterSurface.CFrame = CFrame.new(oceanCenter.X, surfaceY, oceanCenter.Z) * yawOnly
     waterSurface.Parent = oceanModel
 
-    -- ฟองคลื่นริมฝั่งตรงหน้าแถวหน้ากระดาน
     local shorePos = (anchorRoot.CFrame * CFrame.new(0, 0, -3.4)).Position
     local foam = Instance.new("Part")
     foam.Name = "ShorelineFoam"
@@ -663,7 +901,6 @@ local function spawnHugeOceanInFront(anchorRoot, folder)
     foam.CFrame = CFrame.new(shorePos.X, surfaceY + 0.1, shorePos.Z) * yawOnly
     foam.Parent = oceanModel
 
-    -- แถบคลื่นน้ำขยับเบาๆ บนผิวน้ำ
     local waveParts = {}
     for w = 1, 5 do
         local distZ = -(10 + w * 26)
@@ -703,7 +940,7 @@ local function spawnHugeOceanInFront(anchorRoot, folder)
 end
 
 -- =========================================================
--- ปล่อยกระทงลงน้ำพร้อมระลอกคลื่นและลอยออกทะเลอย่างสมจริง
+-- ปล่อยกระทงลงน้ำตั้งตรงพร้อมระลอกคลื่นและลอยออกทะเล
 -- =========================================================
 local function releaseKrathongToOcean(krathongModel, surfaceY, yawOnly, folder)
     if not krathongModel or not krathongModel.Parent then
@@ -714,11 +951,10 @@ local function releaseKrathongToOcean(krathongModel, surfaceY, yawOnly, folder)
         return
     end
 
-    local startPos = Vector3.new(primary.Position.X, surfaceY + 0.22, primary.Position.Z)
+    local startPos = Vector3.new(primary.Position.X, surfaceY + 0.24, primary.Position.Z)
     local startCf = CFrame.new(startPos) * yawOnly
     krathongModel:PivotTo(startCf)
 
-    -- ระลอกคลื่นวงกลมตอนกระทงแตะผิวน้ำ
     local ripple = Instance.new("Part")
     ripple.Name = "WaterRipple"
     ripple.Shape = Enum.PartType.Cylinder
@@ -745,7 +981,6 @@ local function releaseKrathongToOcean(krathongModel, surfaceY, yawOnly, folder)
         end
     end)
 
-    -- ขยับกระทงลอยคลื่นออกทะเลด้านหน้า
     task.spawn(function()
         local elapsed = 0
         local driftSpeed = 4.2 + (math.random() * 1.4)
@@ -762,7 +997,6 @@ local function releaseKrathongToOcean(krathongModel, surfaceY, yawOnly, folder)
     end)
 end
 
--- เล่นอนิเมชั่นค่อยๆ ลอยกระทง (ใช้ได้ทั้งตัวเราและโคลนทุกคน)
 local function playSlowKrathongAnimation(char, motors, krathongModel, surfaceY, folder, isSelf)
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then
@@ -770,7 +1004,7 @@ local function playSlowKrathongAnimation(char, motors, krathongModel, surfaceY, 
     end
     local yawOnly = root.CFrame - root.CFrame.Position
 
-    -- ขั้นที่ 1 (0.0s -> 0.85s): ก้มศีรษะและยกกระทงขึ้นอธิษฐาน
+    -- ขั้นที่ 1: ก้มศีรษะและยกกระทงขึ้นอธิษฐาน
     local t1 = 0
     while t1 < 0.85 and isEnabled do
         local dt = RunService.RenderStepped:Wait()
@@ -784,7 +1018,7 @@ local function playSlowKrathongAnimation(char, motors, krathongModel, surfaceY, 
         return
     end
 
-    -- ขั้นที่ 2 (0.85s -> 2.35s): ค่อยๆ โน้มตัวและลดแขนวางกระทงลงบนผิวน้ำ
+    -- ขั้นที่ 2: ค่อยๆ โน้มตัวและลดแขนวางกระทงลงบนผิวน้ำ
     local t2 = 0
     while t2 < 1.5 and isEnabled do
         local dt = RunService.RenderStepped:Wait()
@@ -805,7 +1039,7 @@ local function playSlowKrathongAnimation(char, motors, krathongModel, surfaceY, 
         activeSelfKrathongModel = nil
     end
 
-    -- ขั้นที่ 3 (2.35s -> 3.15s): ค่อยๆ ยืดตัวกลับมายืนตรงมองกระทงลอยออกไป
+    -- ขั้นที่ 3: ยืดตัวกลับมายืนตรงมองกระทงลอยออกไป
     local t3 = 0
     while t3 < 0.8 and isEnabled do
         local dt = RunService.RenderStepped:Wait()
@@ -817,9 +1051,12 @@ local function playSlowKrathongAnimation(char, motors, krathongModel, surfaceY, 
 end
 
 -- =========================================================
--- ล้างภาพลวงตาทั้งหมดและคืนค่าตัวละครเราทันทีเมื่อกดปิด
+-- ล้างภาพลวงตา เสียงเพลง และคืนมุมกล้องเดิมทันทีเมื่อกดปิด
 -- =========================================================
 local function clearAllIllusions()
+    stopBackgroundMusic()
+    setCinematicCameraEnabled(false)
+
     if illusionFolder then
         illusionFolder:Destroy()
         illusionFolder = nil
@@ -837,12 +1074,14 @@ local function clearAllIllusions()
 end
 
 -- =========================================================
--- ลูปหลัก 3 เฟส: กองตายด้านหลัง -> แถวหน้ากระดาน+ทะเล 3 วิ -> เราลอย+ทุกคนตาม 2 วิ
+-- ลูปหลัก 3 เฟส
 -- =========================================================
 local function startIllusionLoop(currentToken)
     ensureIllusionFolder()
     setRealPlayersHidden(true)
     setLocalPlayerFrozen(true)
+    startBackgroundMusic(currentToken)
+    setCinematicCameraEnabled(true)
 
     task.spawn(function()
         while isEnabled and sessionToken == currentToken do
@@ -858,8 +1097,10 @@ local function startIllusionLoop(currentToken)
             local yawOnly = anchorCf - anchorCf.Position
 
             -- ---------------------------------------------------------
-            -- เฟส 1: ทุกคน (ยกเว้นเรา) กองรวมตายด้านหลังเรา / สุ่มตายทั่วแมพ
+            -- เฟส 1: ทุกคน (ยกเว้นเรา) กองรวมตายรัวๆ ด้านหลังเรา
             -- ---------------------------------------------------------
+            setCameraStage("phase1_pile", anchorCf, 4)
+
             for burst = 1, CONFIG.DeathBurstCount do
                 if not isEnabled or sessionToken ~= currentToken then
                     return
@@ -875,11 +1116,10 @@ local function startIllusionLoop(currentToken)
                     local offsetX, offsetZ
                     if CONFIG.DeathLocationMode == "random_map" then
                         offsetX = math.random(-55, 55)
-                        offsetZ = math.random(-55, 55)
+                        offsetZ = math.random(6, 60)
                     else
-                        -- กองรวมกันด้านหลังเรา (+Z คือด้านหลังตัวละคร)
                         offsetX = math.random(-32, 32) / 10
-                        offsetZ = math.random(65, 115) / 10
+                        offsetZ = math.random(70, 120) / 10
                     end
 
                     local worldXZ = (anchorCf * CFrame.new(offsetX, 0, offsetZ)).Position
@@ -887,7 +1127,7 @@ local function startIllusionLoop(currentToken)
                     local spawnPos = Vector3.new(worldXZ.X, floorY, worldXZ.Z)
                     local randomYaw = CFrame.Angles(0, math.rad(math.random(0, 359)), 0)
 
-                    local clone = spawnFreshClone(entry.player, entry.label, spawnPos, randomYaw, false)
+                    local clone = spawnFreshClone(entry.player, entry.label, spawnPos, randomYaw, false, true)
                     if clone then
                         table.insert(burstClones, clone)
                     end
@@ -910,16 +1150,16 @@ local function startIllusionLoop(currentToken)
             end
 
             -- ---------------------------------------------------------
-            -- เฟส 2: เกิดใหม่เลือดเต็ม 100% วาปเรียงแถวหน้ากระดาน + เสกทะเล 3 วิ
+            -- เฟส 2: ล้างชิ้นส่วนตายทิ้งทั้งหมด -> เกิดใหม่เลือดเต็ม 100% แถวหน้ากระดาน + เสกทะเล 3 วิ
             -- ---------------------------------------------------------
             local folder = ensureIllusionFolder()
             folder:ClearAllChildren()
+            task.wait()
 
             local targets = gatherTargetSources()
             local lineupEntries = {}
 
             for idx, entry in ipairs(targets) do
-                -- แถวหน้ากระดานแถวเดียวกับเรา (สลับซ้าย-ขวาแนวนอน)
                 local tier = math.ceil(idx / 2)
                 local side = (idx % 2 == 1) and -1 or 1
                 local xOffset = side * tier * CONFIG.LineupSpacing
@@ -927,7 +1167,7 @@ local function startIllusionLoop(currentToken)
                 local slotFloorY = getFloorY(myRoot, slotWorld.X, slotWorld.Z)
                 local spawnPos = Vector3.new(slotWorld.X, slotFloorY, slotWorld.Z)
 
-                local clone = spawnFreshClone(entry.player, entry.label, spawnPos, yawOnly, true)
+                local clone = spawnFreshClone(entry.player, entry.label, spawnPos, yawOnly, true, false)
                 if clone then
                     local motors = snapshotCharacterMotors(clone)
                     applyCeremonyPose(motors, 0.18, 0)
@@ -944,7 +1184,6 @@ local function startIllusionLoop(currentToken)
                 end
             end
 
-            -- ตัวเราถือกระทงสมจริงด้วย
             savedSelfMotors = snapshotCharacterMotors(myChar)
             if CONFIG.GiveSelfKrathong then
                 applyCeremonyPose(savedSelfMotors, 0.18, 0)
@@ -953,8 +1192,9 @@ local function startIllusionLoop(currentToken)
                 positionKrathongInHands(activeSelfKrathongModel, myChar, 0.18, 0)
             end
 
-            -- เสกทะเลขนาดใหญ่หน้าเรา รอ 3 วินาที
             local _, oceanSurfaceY = spawnHugeOceanInFront(myRoot, folder)
+            setCameraStage("phase2_lineup_ocean", anchorCf, #lineupEntries)
+
             local waitElapsed = 0
             while waitElapsed < CONFIG.OceanWaitSec and isEnabled and sessionToken == currentToken do
                 local dt = RunService.RenderStepped:Wait()
@@ -963,6 +1203,10 @@ local function startIllusionLoop(currentToken)
                     applyCeremonyPose(savedSelfMotors, 0.18, 0)
                     positionKrathongInHands(activeSelfKrathongModel, myChar, 0.18, 0)
                 end
+                for _, item in ipairs(lineupEntries) do
+                    applyCeremonyPose(item.motors, 0.18, 0)
+                    positionKrathongInHands(item.krathong, item.clone, 0.18, 0)
+                end
             end
 
             if not isEnabled or sessionToken ~= currentToken then
@@ -970,8 +1214,10 @@ local function startIllusionLoop(currentToken)
             end
 
             -- ---------------------------------------------------------
-            -- เฟส 3: เราเริ่มลอยกระทงสมจริง -> อีก 2 วิทุกคนทำตามพร้อมกันหมด
+            -- เฟส 3: กล้องซูมจับเราลอยกระทง -> อีก 2 วิ ถอยมุมกว้างทุกคนทำตามพร้อมกัน
             -- ---------------------------------------------------------
+            setCameraStage("phase3_self_focus", anchorCf, #lineupEntries)
+
             task.spawn(function()
                 if activeSelfKrathongModel then
                     playSlowKrathongAnimation(
@@ -999,7 +1245,8 @@ local function startIllusionLoop(currentToken)
                 return
             end
 
-            -- ทุกคนในแถวหน้ากระดานทำตามพร้อมกันหมด
+            setCameraStage("phase3_group_wide", anchorCf, #lineupEntries)
+
             for _, item in ipairs(lineupEntries) do
                 task.spawn(function()
                     playSlowKrathongAnimation(
@@ -1013,7 +1260,6 @@ local function startIllusionLoop(currentToken)
                 end)
             end
 
-            -- รอชมกระทงลอยออกทะเลก่อนวนกลับรอบใหม่
             local watchElapsed = 0
             local totalWatch = 3.15 + CONFIG.FloatWatchSec
             while watchElapsed < totalWatch and isEnabled and sessionToken == currentToken do
