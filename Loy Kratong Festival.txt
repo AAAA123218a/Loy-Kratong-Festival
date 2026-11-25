@@ -1,10 +1,10 @@
 --[[
-    Loy Kratong Festival - Global Roblox Invite Menu & Spotlight Dance
-    ทำงานเฉพาะฝั่ง Client (เห็นคนเดียวในหน้าจอเรา ไม่กระทบเซิร์ฟเวอร์)
-    1. เมนูเปิด-ปิดมีอนิเมชั่น (Tween) ใส่ชื่อใครก็ได้ในโลก Roblox ไม่จำกัดจำนวน (100 - 1,000+ คน)
-    2. ปุ่มสีเขียวดึงอวาต้า ("ดึงแล้ว") + ปุ่มบวกสีฟ้า ("+") เพิ่มช่องใส่ชื่อ + ปุ่ม "รันทันที" พับเมนูเก็บอัตโนมัติ
-    3. บังคับตัวละครทุกคนยืนตรงและสูงเท่ากัน (R15 Uniform Normalization) ไม่มีตัวจมพื้นหรือบั๊ก
-    4. เปิดปุ๊บ เพลงมา + ทะเลขึ้น รอ 3 วิ -> ลอยกระทงทันที -> กล้องวนหาทีละคนคนละ 3 วิ เต้นสุ่มหลายท่าเต็มตัว -> วนซ้ำ!
+    Loy Kratong Festival - Portable Mobile Menu & Server-Still Client Show
+    ทำงานเฉพาะฝั่ง Client 100% (คนอื่นในเซิร์ฟเวอร์เห็นเรายืนนิ่งปกติ ไม่เห็นเราเต้น)
+    1. เมนูขนาดพกพา (320x250) เห็นครบทุกปุ่ม ลากย้ายได้ทั้งแถบหัวเมนู และหุบ-เปิดมีอนิเมชั่น
+    2. ใส่ชื่อ Roblox ทั่วโลกไม่จำกัด · ปุ่มเขียว ("ดึงแล้ว") · ปุ่ม + สีฟ้า · กด "รันทันที" พับเมนูเก็บอัตโนมัติ
+    3. ซ่อนตัวจริงเฉพาะหน้าจอเราแบบไม่แก้ข้อต่อ (เซิร์ฟเห็นยืนนิ่ง 100%) แล้วใช้ร่างจำลอง Client-only เต้น & ลอยกระทง
+    4. เปิดปุ๊บ เพลงมา + ทะเลขึ้น รอ 3 วิ -> ลอยกระทงทันที -> กล้องวนหาทีละคนคนละ 3 วิ เต้นสุ่ม 6 ท่า -> วนซ้ำ!
 ]]
 
 local Players = game:GetService("Players")
@@ -70,13 +70,15 @@ end
 -- สถานะระบบหลัก
 local isRunning = false
 local isMenuOpen = true
+local menuTweenToken = 0
 local sessionToken = 0
 local illusionFolder = nil
 local freezeConnection = nil
+local selfVisibilityConn = nil
 local cameraConnection = nil
 local savedPlayerState = nil
+local savedDisplayDistanceType = nil
 local savedCameraState = nil
-local savedSelfMotors = {}
 local activeSelfKrathongModel = nil
 local activeSound = nil
 local cachedAudioAsset = nil
@@ -297,8 +299,60 @@ local function createNormalizedAvatarModel(entry, spawnPos, yawOnly, folder)
 end
 
 -- =========================================================
--- ระบบล็อกตัวเราให้อยู่ตรงกลางแถวหน้ากระดาน
+-- ระบบซ่อนตัวจริงเฉพาะหน้าจอเรา & ล็อกให้ยืนนิ่ง 100% (คนอื่นในเซิร์ฟเห็นเรายืนนิ่งปกติ)
 -- =========================================================
+local function setLocalCharacterHiddenLocally(hide)
+    if selfVisibilityConn then
+        selfVisibilityConn:Disconnect()
+        selfVisibilityConn = nil
+    end
+
+    local char = LocalPlayer.Character
+    if not hide then
+        if char then
+            for _, desc in ipairs(char:GetDescendants()) do
+                if desc:IsA("BasePart") or desc:IsA("Decal") then
+                    desc.LocalTransparencyModifier = 0
+                end
+            end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and savedDisplayDistanceType then
+                hum.DisplayDistanceType = savedDisplayDistanceType
+            end
+        end
+        savedDisplayDistanceType = nil
+        return
+    end
+
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum and not savedDisplayDistanceType then
+            savedDisplayDistanceType = hum.DisplayDistanceType
+            hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+        end
+    end
+
+    -- ใช้ LocalTransparencyModifier เท่านั้น เพื่อซ่อนเฉพาะจอเราโดยไม่ส่งผลใดๆ ต่อเซิร์ฟเวอร์
+    selfVisibilityConn = RunService.RenderStepped:Connect(function()
+        if not isRunning then
+            return
+        end
+        local c = LocalPlayer.Character
+        if not c then
+            return
+        end
+        for _, desc in ipairs(c:GetDescendants()) do
+            if desc:IsA("BasePart") or desc:IsA("Decal") then
+                desc.LocalTransparencyModifier = 1
+            end
+        end
+        local h = c:FindFirstChildOfClass("Humanoid")
+        if h and h.DisplayDistanceType ~= Enum.HumanoidDisplayDistanceType.None then
+            h.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+        end
+    end)
+end
+
 local function setLocalPlayerFrozen(freeze)
     if freezeConnection then
         freezeConnection:Disconnect()
@@ -366,6 +420,7 @@ local function setLocalPlayerFrozen(freeze)
         if r then
             r.Anchored = true
             r.AssemblyLinearVelocity = Vector3.zero
+            r.AssemblyAngularVelocity = Vector3.zero
         end
     end)
 end
@@ -1120,6 +1175,7 @@ end
 local function clearFestivalScene()
     stopBackgroundMusic()
     setCinematicCameraEnabled(false)
+    setLocalCharacterHiddenLocally(false)
 
     if illusionFolder then
         illusionFolder:Destroy()
@@ -1131,8 +1187,6 @@ local function clearFestivalScene()
         end)
         activeSelfKrathongModel = nil
     end
-    restoreCharacterMotors(savedSelfMotors)
-    table.clear(savedSelfMotors)
     setLocalPlayerFrozen(false)
 end
 
@@ -1162,22 +1216,11 @@ local function collectRosterForRun()
             end
         end
     end
-
-    -- กรณีไม่ได้ใส่ชื่อใครเลย ให้ดึงตัวเราเองแสดงตัวอย่างเพื่อให้ทำงานได้ทันที
-    if #roster == 0 then
-        table.insert(roster, {
-            username = LocalPlayer.DisplayName,
-            userId = LocalPlayer.UserId,
-            description = nil,
-            fallbackChar = LocalPlayer.Character,
-        })
-    end
-
     return roster
 end
 
 -- =========================================================
--- ลูปหลัก: รอ 3 วิ -> ลอยกระทงทันที -> กล้องวนหาทีละคนเต้นสุ่ม -> วนซ้ำ
+-- ลูปหลัก: ตัวจริงยืนนิ่งบนเซิร์ฟ + ร่างจำลอง Client เต้น & ลอยกระทง + กล้องวนทีละคน
 -- =========================================================
 local function startFestivalShow(currentToken)
     local folder = ensureIllusionFolder()
@@ -1204,7 +1247,7 @@ local function startFestivalShow(currentToken)
         -- เสกทะเลใหญ่ด้านหน้าเรา
         local _, oceanSurfaceY = spawnHugeOceanInFront(myRoot, folder)
 
-        -- ดึงอวาต้าทุกคนจากรายชื่อและสร้างแถวหน้ากระดานยืนตรงความสูงเท่ากัน
+        -- ดึงอวาต้าทุกคนจากรายชื่อ
         local roster = collectRosterForRun()
         if not isRunning or sessionToken ~= currentToken then
             return
@@ -1232,20 +1275,54 @@ local function startFestivalShow(currentToken)
             end
         end
 
-        savedSelfMotors = snapshotCharacterMotors(myChar)
+        -- สร้างร่างจำลอง Client-only ของตัวเราเองตรงกลางแถว (ตัวจริงไม่แก้ Motor6D เพื่อให้อยู่นิ่ง 100% บนเซิร์ฟ)
+        local selfDesc = nil
+        local okSelfDesc, fetchedDesc = pcall(function()
+            return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId)
+        end)
+        if okSelfDesc and fetchedDesc then
+            selfDesc = fetchedDesc
+        else
+            local myHum = myChar:FindFirstChildOfClass("Humanoid")
+            if myHum then
+                local okApplied, applied = pcall(function()
+                    return myHum:GetAppliedDescription()
+                end)
+                if okApplied and applied then
+                    selfDesc = applied
+                end
+            end
+        end
 
-        -- ลำดับรายชื่อที่จะให้กล้องโฟกัสทีละคน (รวมตัวเราด้วย)
+        local selfFloorY = getFloorY(myRoot, anchorCf.Position.X, anchorCf.Position.Z)
+        local selfClone = createNormalizedAvatarModel({
+            username = LocalPlayer.DisplayName,
+            userId = LocalPlayer.UserId,
+            description = selfDesc,
+            fallbackChar = myChar,
+        }, Vector3.new(anchorCf.Position.X, selfFloorY, anchorCf.Position.Z), yawOnly, folder)
+
+        -- ซ่อนตัวจริงเฉพาะหน้าจอเราเมื่อเสกร่างจำลองสำเร็จ (คนอื่นในเซิร์ฟยังเห็นเรายืนนิ่งปกติ)
+        if selfClone then
+            setLocalCharacterHiddenLocally(true)
+        end
+
+        local selfMotors = selfClone and snapshotCharacterMotors(selfClone) or {}
+
+        -- ลำดับรายชื่อที่จะให้กล้องโฟกัสทีละคน (รวมร่างจำลองของเราด้วย)
         local spotlightQueue = {}
         for _, d in ipairs(dancers) do
             table.insert(spotlightQueue, d)
         end
-        table.insert(spotlightQueue, {
-            model = myChar,
-            motors = savedSelfMotors,
-            danceStyle = math.random(1, 6),
-            phaseOffset = 0,
-            isSelf = true,
-        })
+        if selfClone then
+            table.insert(spotlightQueue, {
+                model = selfClone,
+                motors = selfMotors,
+                danceStyle = math.random(1, 6),
+                phaseOffset = 0,
+                isSelf = true,
+            })
+        end
 
         -- ปล่อยโคมลอยเป็นระยะตลอดงาน
         task.spawn(function()
@@ -1255,32 +1332,32 @@ local function startFestivalShow(currentToken)
             end
         end)
 
-        -- วนซ้ำรอบ: [รอ 3 วิลอยกระทงทันที] -> [กล้องไปหาทีละคนเต้นสุ่มหลายท่า] -> [วนกลับลอยกระทง]
+        -- วนซ้ำรอบ: [รอ 3 วิลอยกระทงทันที] -> [กล้องไปหาทีละคนเต้นสุ่ม 6 ท่า] -> [วนกลับลอยกระทง]
         while isRunning and sessionToken == currentToken do
-            -- เตรียมกระทงตั้งตรงใส่มือทุกคน
+            -- เตรียมกระทงตั้งตรงใส่มือทุกคนและร่างจำลองของเรา
             for idx, d in ipairs(dancers) do
                 d.krathong = createRealisticKrathongModel("Krathong_" .. idx)
                 d.krathong.Parent = folder
                 applyCeremonyPose(d.motors, 0.2, 0)
                 positionKrathongInHands(d.krathong, d.model, 0.2, 0, 0)
             end
-            if CONFIG.GiveSelfKrathong then
+            if CONFIG.GiveSelfKrathong and selfClone then
                 activeSelfKrathongModel = createRealisticKrathongModel("Krathong_Self")
                 activeSelfKrathongModel.Parent = folder
-                applyCeremonyPose(savedSelfMotors, 0.2, 0)
-                positionKrathongInHands(activeSelfKrathongModel, myChar, 0.2, 0, 0)
+                applyCeremonyPose(selfMotors, 0.2, 0)
+                positionKrathongInHands(activeSelfKrathongModel, selfClone, 0.2, 0, 0)
             end
 
             -- 1) รอ 3 วินาที แล้วลอยกระทงทันที
-            setCameraFocus("wide_row", anchorCf, nil, #dancers)
+            setCameraFocus("wide_row", anchorCf, nil, #dancers + (selfClone and 1 or 0))
             local waitElapsed = 0
             while waitElapsed < CONFIG.PreFloatWaitSec and isRunning and sessionToken == currentToken do
                 local dt = RunService.RenderStepped:Wait()
                 waitElapsed = waitElapsed + dt
                 local gentleSway = math.sin(waitElapsed * 2.4) * 0.08
-                if activeSelfKrathongModel then
-                    applyCeremonyPose(savedSelfMotors, 0.22 + gentleSway * 0.4, 0)
-                    positionKrathongInHands(activeSelfKrathongModel, myChar, 0.22, 0, gentleSway)
+                if activeSelfKrathongModel and selfClone then
+                    applyCeremonyPose(selfMotors, 0.22 + gentleSway * 0.4, 0)
+                    positionKrathongInHands(activeSelfKrathongModel, selfClone, 0.22, 0, gentleSway)
                 end
                 for _, d in ipairs(dancers) do
                     applyCeremonyPose(d.motors, 0.22 + gentleSway * 0.4, 0)
@@ -1293,15 +1370,15 @@ local function startFestivalShow(currentToken)
             end
 
             -- 2) ทุกคนปล่อยกระทงลงทะเลทันทีพร้อมกัน
-            setCameraFocus("krathong_release", anchorCf, nil, #dancers)
+            setCameraFocus("krathong_release", anchorCf, nil, #dancers + (selfClone and 1 or 0))
             local releaseDoneCount = 0
-            local totalToRelease = #dancers + (activeSelfKrathongModel and 1 or 0)
+            local totalToRelease = #dancers + ((activeSelfKrathongModel and selfClone) and 1 or 0)
 
-            if activeSelfKrathongModel then
+            if activeSelfKrathongModel and selfClone then
                 local selfK = activeSelfKrathongModel
                 activeSelfKrathongModel = nil
                 task.spawn(function()
-                    playSlowKrathongAnimation(myChar, savedSelfMotors, selfK, oceanSurfaceY, folder, currentToken)
+                    playSlowKrathongAnimation(selfClone, selfMotors, selfK, oceanSurfaceY, folder, currentToken)
                     releaseDoneCount = releaseDoneCount + 1
                 end)
             end
@@ -1325,11 +1402,13 @@ local function startFestivalShow(currentToken)
                 return
             end
 
-            -- 3) มุมกล้องไปหาแต่ละตัวละครทีละคน คนละ 3 วิ + สุ่มท่าเต้นเต็มตัวหลากหลายคนละหลายๆ ที
+            -- 3) มุมกล้องไปหาแต่ละคนทีละคน คนละ 3 วิ + สุ่มท่าเต้นเต็มตัวหลากหลายคนละหลายๆ ที
             for _, d in ipairs(dancers) do
                 d.danceStyle = math.random(1, 6)
             end
-            spotlightQueue[#spotlightQueue].danceStyle = math.random(1, 6)
+            if #spotlightQueue > 0 then
+                spotlightQueue[#spotlightQueue].danceStyle = math.random(1, 6)
+            end
 
             local globalDanceClock = 0
             for _, targetDancer in ipairs(spotlightQueue) do
@@ -1337,12 +1416,11 @@ local function startFestivalShow(currentToken)
                     return
                 end
 
-                -- สุ่มเปลี่ยนท่าเต้นใหม่ให้คนนี้เด่นๆ และสลับอีกท่ากลางช่วงเพื่อเต้นหลายๆ ท่า
                 targetDancer.danceStyle = math.random(1, 6)
                 local secondComboStyle = ((targetDancer.danceStyle + math.random(1, 4) - 1) % 6) + 1
                 local switchedCombo = false
 
-                setCameraFocus("spotlight_person", anchorCf, targetDancer.model, #dancers)
+                setCameraFocus("spotlight_person", anchorCf, targetDancer.model, #dancers + 1)
 
                 local spotElapsed = 0
                 while spotElapsed < CONFIG.SpotlightPerPersonSec and isRunning and sessionToken == currentToken do
@@ -1355,9 +1433,10 @@ local function startFestivalShow(currentToken)
                         targetDancer.danceStyle = secondComboStyle
                     end
 
-                    -- ตัวเราและทุกคนเต้นท่าแตกต่างกันแยกจากกันตลอดเวลา
-                    local selfEntry = spotlightQueue[#spotlightQueue]
-                    applyUniqueFullBodyDance(savedSelfMotors, selfEntry.danceStyle, globalDanceClock, 0)
+                    if selfClone then
+                        local selfEntry = spotlightQueue[#spotlightQueue]
+                        applyUniqueFullBodyDance(selfMotors, selfEntry.danceStyle, globalDanceClock, 0)
+                    end
                     for _, d in ipairs(dancers) do
                         applyUniqueFullBodyDance(d.motors, d.danceStyle, globalDanceClock, d.phaseOffset)
                     end
@@ -1375,7 +1454,7 @@ local function startFestivalShow(currentToken)
 end
 
 -- =========================================================
--- สร้างเมนูเปิด-ปิดมีอนิเมชั่น (ใส่ชื่อ Roblox ทั่วโลก, ปุ่มเขียวดึงแล้ว, ปุ่มฟ้า +, รันทันที)
+-- สร้างเมนูขนาดพกพา (320x250) ลากย้าย & หุบ-เปิดมีอนิเมชั่น เห็นครบทุกปุ่มบนมือถือ
 -- =========================================================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = GUI_NAME
@@ -1383,22 +1462,23 @@ screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = guiParent
 
--- ปุ่มลอยสำหรับเปิด-ปิดเมนู
+-- ปุ่มลอยสำหรับเปิด-ปิดเมนู (ลากย้ายได้ + กดหุบ/กางได้)
 local menuToggleBtn = Instance.new("TextButton")
 menuToggleBtn.Name = "MenuToggleButton"
-menuToggleBtn.Size = UDim2.fromOffset(148, CONFIG.ButtonSizePx)
-menuToggleBtn.Position = UDim2.new(0.025, 0, 0.22, 0)
+menuToggleBtn.Size = UDim2.fromOffset(128, math.min(CONFIG.ButtonSizePx, 44))
+menuToggleBtn.Position = UDim2.new(0.02, 0, 0.24, 0)
 menuToggleBtn.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
 menuToggleBtn.BorderSizePixel = 0
 menuToggleBtn.AutoButtonColor = false
 menuToggleBtn.Font = Enum.Font.GothamBold
-menuToggleBtn.TextSize = 13
+menuToggleBtn.TextSize = 12
 menuToggleBtn.TextColor3 = Color3.fromRGB(248, 250, 252)
 menuToggleBtn.Text = "เมนูลอยกระทง"
+menuToggleBtn.ZIndex = 5
 menuToggleBtn.Parent = screenGui
 
 local toggleCorner = Instance.new("UICorner")
-toggleCorner.CornerRadius = UDim.new(0, 12)
+toggleCorner.CornerRadius = UDim.new(0, 10)
 toggleCorner.Parent = menuToggleBtn
 
 local toggleStroke = Instance.new("UIStroke")
@@ -1406,19 +1486,25 @@ toggleStroke.Thickness = 1.5
 toggleStroke.Color = Color3.fromRGB(245, 158, 11)
 toggleStroke.Parent = menuToggleBtn
 
--- หน้าต่างเมนูหลัก (มีอนิเมชั่นขยาย/หด)
+-- หน้าต่างเมนูขนาดพกพา (320x250 เห็นครบทุกปุ่มบนมือถือแนวนอน)
 local menuFrame = Instance.new("Frame")
 menuFrame.Name = "MainInviteMenu"
-menuFrame.Size = UDim2.fromOffset(390, 420)
-menuFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+menuFrame.Size = UDim2.fromOffset(320, 250)
+menuFrame.Position = UDim2.new(0.5, 0, 0.52, 0)
 menuFrame.AnchorPoint = Vector2.new(0.5, 0.5)
 menuFrame.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
 menuFrame.BorderSizePixel = 0
 menuFrame.ClipsDescendants = true
+menuFrame.ZIndex = 4
 menuFrame.Parent = screenGui
 
+local menuSizeConstraint = Instance.new("UISizeConstraint")
+menuSizeConstraint.MinSize = Vector2.new(280, 215)
+menuSizeConstraint.MaxSize = Vector2.new(340, 265)
+menuSizeConstraint.Parent = menuFrame
+
 local menuCorner = Instance.new("UICorner")
-menuCorner.CornerRadius = UDim.new(0, 14)
+menuCorner.CornerRadius = UDim.new(0, 12)
 menuCorner.Parent = menuFrame
 
 local menuStroke = Instance.new("UIStroke")
@@ -1430,125 +1516,129 @@ local menuScale = Instance.new("UIScale")
 menuScale.Scale = 1
 menuScale.Parent = menuFrame
 
--- ส่วนหัวเมนู
+-- ส่วนหัวเมนู (จับลากย้ายตำแหน่งหน้าต่างได้ทั้งเมาส์และทัช)
 local headerBar = Instance.new("Frame")
-headerBar.Size = UDim2.new(1, 0, 0, 48)
+headerBar.Size = UDim2.new(1, 0, 0, 36)
 headerBar.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
 headerBar.BorderSizePixel = 0
+headerBar.Active = true
 headerBar.Parent = menuFrame
 
 local headerTitle = Instance.new("TextLabel")
-headerTitle.Size = UDim2.new(1, -135, 1, 0)
-headerTitle.Position = UDim2.fromOffset(14, 0)
+headerTitle.Size = UDim2.new(1, -124, 1, 0)
+headerTitle.Position = UDim2.fromOffset(10, 0)
 headerTitle.BackgroundTransparency = 1
 headerTitle.Font = Enum.Font.GothamBold
-headerTitle.TextSize = 14
+headerTitle.TextSize = 13
 headerTitle.TextXAlignment = Enum.TextXAlignment.Left
+headerTitle.TextTruncate = Enum.TextTruncate.AtEnd
 headerTitle.TextColor3 = Color3.fromRGB(248, 250, 252)
-headerTitle.Text = "Loy Kratong Festival"
+headerTitle.Text = "Loy Kratong (ลากย้าย)"
 headerTitle.Parent = headerBar
 
 local countLabel = Instance.new("TextLabel")
-countLabel.Size = UDim2.fromOffset(82, 48)
-countLabel.Position = UDim2.new(1, -124, 0, 0)
+countLabel.Size = UDim2.fromOffset(74, 36)
+countLabel.Position = UDim2.new(1, -112, 0, 0)
 countLabel.BackgroundTransparency = 1
 countLabel.Font = Enum.Font.GothamMedium
-countLabel.TextSize = 12
+countLabel.TextSize = 11
 countLabel.TextXAlignment = Enum.TextXAlignment.Right
 countLabel.TextColor3 = Color3.fromRGB(251, 191, 36)
 countLabel.Text = "ดึงแล้ว 0 คน"
 countLabel.Parent = headerBar
 
 local closeMenuBtn = Instance.new("TextButton")
-closeMenuBtn.Size = UDim2.fromOffset(30, 30)
-closeMenuBtn.Position = UDim2.new(1, -38, 0.5, -15)
+closeMenuBtn.Size = UDim2.fromOffset(28, 28)
+closeMenuBtn.Position = UDim2.new(1, -34, 0.5, -14)
 closeMenuBtn.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
 closeMenuBtn.BorderSizePixel = 0
 closeMenuBtn.Font = Enum.Font.GothamBold
 closeMenuBtn.TextSize = 14
 closeMenuBtn.TextColor3 = Color3.fromRGB(226, 232, 240)
 closeMenuBtn.Text = "×"
+closeMenuBtn.ZIndex = 6
 closeMenuBtn.Parent = headerBar
 
 local closeCorner = Instance.new("UICorner")
-closeCorner.CornerRadius = UDim.new(0, 8)
+closeCorner.CornerRadius = UDim.new(0, 7)
 closeCorner.Parent = closeMenuBtn
 
--- คำอธิบายสั้นด้านบน
+-- คำอธิบายสั้นกะทัดรัด
 local subNote = Instance.new("TextLabel")
-subNote.Size = UDim2.new(1, -28, 0, 26)
-subNote.Position = UDim2.fromOffset(14, 52)
+subNote.Size = UDim2.new(1, -20, 0, 18)
+subNote.Position = UDim2.fromOffset(10, 38)
 subNote.BackgroundTransparency = 1
 subNote.Font = Enum.Font.Gotham
-subNote.TextSize = 11
+subNote.TextSize = 10
 subNote.TextXAlignment = Enum.TextXAlignment.Left
+subNote.TextTruncate = Enum.TextTruncate.AtEnd
 subNote.TextColor3 = Color3.fromRGB(148, 163, 184)
-subNote.Text = "ใส่ชื่อ Roblox ใครก็ได้ในโลก · กดปุ่มเขียวเพื่อดึง · กด + สีฟ้าเพื่อเพิ่มคน"
+subNote.Text = "ใส่ชื่อ Roblox ทั่วโลก · กดเขียวดึง · + เพิ่มคน"
 subNote.Parent = menuFrame
 
 -- ScrollingFrame สำหรับเพิ่มรายชื่อ 100 - 1,000+ คนได้ไม่จำกัด
 local listScroll = Instance.new("ScrollingFrame")
-listScroll.Size = UDim2.new(1, -24, 1, -148)
-listScroll.Position = UDim2.fromOffset(12, 82)
+listScroll.Size = UDim2.new(1, -20, 1, -108)
+listScroll.Position = UDim2.fromOffset(10, 58)
 listScroll.BackgroundColor3 = Color3.fromRGB(11, 17, 32)
 listScroll.BorderSizePixel = 0
-listScroll.ScrollBarThickness = 5
+listScroll.ScrollBarThickness = 4
 listScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 116, 139)
 listScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 listScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 listScroll.Parent = menuFrame
 
 local scrollCorner = Instance.new("UICorner")
-scrollCorner.CornerRadius = UDim.new(0, 10)
+scrollCorner.CornerRadius = UDim.new(0, 8)
 scrollCorner.Parent = listScroll
 
 local listPadding = Instance.new("UIPadding")
-listPadding.PaddingTop = UDim.new(0, 8)
-listPadding.PaddingBottom = UDim.new(0, 8)
-listPadding.PaddingLeft = UDim.new(0, 8)
-listPadding.PaddingRight = UDim.new(0, 8)
+listPadding.PaddingTop = UDim.new(0, 6)
+listPadding.PaddingBottom = UDim.new(0, 6)
+listPadding.PaddingLeft = UDim.new(0, 6)
+listPadding.PaddingRight = UDim.new(0, 6)
 listPadding.Parent = listScroll
 
 local listLayout = Instance.new("UIListLayout")
 listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-listLayout.Padding = UDim.new(0, 6)
+listLayout.Padding = UDim.new(0, 5)
 listLayout.Parent = listScroll
 
--- แถบปุ่มด้านล่าง: รันทันที / หยุด
+-- แถบปุ่มด้านล่าง: รันทันที / หยุดงาน (เห็นครบ 100%)
 local footerBar = Instance.new("Frame")
-footerBar.Size = UDim2.new(1, -24, 0, 48)
-footerBar.Position = UDim2.new(0, 12, 1, -56)
+footerBar.Size = UDim2.new(1, -20, 0, 38)
+footerBar.Position = UDim2.new(0, 10, 1, -44)
 footerBar.BackgroundTransparency = 1
 footerBar.Parent = menuFrame
 
 local runBtn = Instance.new("TextButton")
-runBtn.Size = UDim2.new(0.64, -4, 1, 0)
+runBtn.Size = UDim2.new(0.62, -3, 1, 0)
 runBtn.Position = UDim2.fromOffset(0, 0)
 runBtn.BackgroundColor3 = Color3.fromRGB(217, 119, 6)
 runBtn.BorderSizePixel = 0
 runBtn.Font = Enum.Font.GothamBold
-runBtn.TextSize = 14
+runBtn.TextSize = 13
 runBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 runBtn.Text = "รันทันที"
 runBtn.Parent = footerBar
 
 local runCorner = Instance.new("UICorner")
-runCorner.CornerRadius = UDim.new(0, 10)
+runCorner.CornerRadius = UDim.new(0, 8)
 runCorner.Parent = runBtn
 
 local stopBtn = Instance.new("TextButton")
-stopBtn.Size = UDim2.new(0.36, -4, 1, 0)
-stopBtn.Position = UDim2.new(0.64, 4, 0, 0)
+stopBtn.Size = UDim2.new(0.38, -3, 1, 0)
+stopBtn.Position = UDim2.new(0.62, 3, 0, 0)
 stopBtn.BackgroundColor3 = Color3.fromRGB(51, 65, 85)
 stopBtn.BorderSizePixel = 0
 stopBtn.Font = Enum.Font.GothamBold
-stopBtn.TextSize = 13
+stopBtn.TextSize = 12
 stopBtn.TextColor3 = Color3.fromRGB(241, 245, 249)
 stopBtn.Text = "หยุดงาน"
 stopBtn.Parent = footerBar
 
 local stopCorner = Instance.new("UICorner")
-stopCorner.CornerRadius = UDim.new(0, 10)
+stopCorner.CornerRadius = UDim.new(0, 8)
 stopCorner.Parent = stopBtn
 
 local function updatePulledCounter()
@@ -1561,37 +1651,45 @@ local function updatePulledCounter()
     countLabel.Text = "ดึงแล้ว " .. pulledCount .. " คน"
 end
 
--- ฟังก์ชันอนิเมชั่นเปิด-ปิดเมนู
+-- ฟังก์ชันอนิเมชั่นเปิด-หุบเมนู (มี Fallback กันค้าง)
 local function setMenuVisibleAnimated(show)
+    menuTweenToken = menuTweenToken + 1
+    local myToken = menuTweenToken
     isMenuOpen = show
+
     if show then
         menuFrame.Visible = true
-        menuScale.Scale = 0.82
+        menuScale.Scale = 0.84
         menuFrame.BackgroundTransparency = 0.35
         TweenService:Create(
             menuScale,
-            TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+            TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
             { Scale = 1 }
         ):Play()
         TweenService:Create(
             menuFrame,
-            TweenInfo.new(0.24, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
             { BackgroundTransparency = 0 }
         ):Play()
     else
         local shrinkTween = TweenService:Create(
             menuScale,
-            TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-            { Scale = 0.82 }
+            TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            { Scale = 0.84 }
         )
         TweenService:Create(
             menuFrame,
-            TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
             { BackgroundTransparency = 0.45 }
         ):Play()
         shrinkTween:Play()
         shrinkTween.Completed:Connect(function()
-            if not isMenuOpen then
+            if menuTweenToken == myToken and not isMenuOpen then
+                menuFrame.Visible = false
+            end
+        end)
+        task.delay(0.22, function()
+            if menuTweenToken == myToken and not isMenuOpen then
                 menuFrame.Visible = false
             end
         end)
@@ -1605,24 +1703,24 @@ local function addInviteRow(defaultText)
 
     local rowFrame = Instance.new("Frame")
     rowFrame.Name = "InviteRow_" .. rowId
-    rowFrame.Size = UDim2.new(1, 0, 0, 38)
+    rowFrame.Size = UDim2.new(1, 0, 0, 32)
     rowFrame.LayoutOrder = rowId
     rowFrame.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
     rowFrame.BorderSizePixel = 0
     rowFrame.Parent = listScroll
 
     local rCorner = Instance.new("UICorner")
-    rCorner.CornerRadius = UDim.new(0, 8)
+    rCorner.CornerRadius = UDim.new(0, 7)
     rCorner.Parent = rowFrame
 
     local nameBox = Instance.new("TextBox")
-    nameBox.Size = UDim2.new(1, -148, 1, -6)
-    nameBox.Position = UDim2.fromOffset(6, 3)
+    nameBox.Size = UDim2.new(1, -124, 1, -6)
+    nameBox.Position = UDim2.fromOffset(4, 3)
     nameBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
     nameBox.BorderSizePixel = 0
     nameBox.ClearTextOnFocus = false
     nameBox.Font = Enum.Font.Gotham
-    nameBox.TextSize = 12
+    nameBox.TextSize = 11
     nameBox.TextXAlignment = Enum.TextXAlignment.Left
     nameBox.TextColor3 = Color3.fromRGB(248, 250, 252)
     nameBox.PlaceholderColor3 = Color3.fromRGB(100, 116, 139)
@@ -1631,8 +1729,8 @@ local function addInviteRow(defaultText)
     nameBox.Parent = rowFrame
 
     local boxPad = Instance.new("UIPadding")
-    boxPad.PaddingLeft = UDim.new(0, 8)
-    boxPad.PaddingRight = UDim.new(0, 6)
+    boxPad.PaddingLeft = UDim.new(0, 7)
+    boxPad.PaddingRight = UDim.new(0, 5)
     boxPad.Parent = nameBox
 
     local boxCorner = Instance.new("UICorner")
@@ -1641,12 +1739,12 @@ local function addInviteRow(defaultText)
 
     -- ปุ่มสีเขียว (กดเพื่อดึง -> เปลี่ยนเป็น "ดึงแล้ว")
     local pullBtn = Instance.new("TextButton")
-    pullBtn.Size = UDim2.fromOffset(68, 30)
-    pullBtn.Position = UDim2.new(1, -136, 0.5, -15)
+    pullBtn.Size = UDim2.fromOffset(58, 26)
+    pullBtn.Position = UDim2.new(1, -116, 0.5, -13)
     pullBtn.BackgroundColor3 = Color3.fromRGB(22, 163, 74)
     pullBtn.BorderSizePixel = 0
     pullBtn.Font = Enum.Font.GothamBold
-    pullBtn.TextSize = 11
+    pullBtn.TextSize = 10
     pullBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     pullBtn.Text = "ดึงตัว"
     pullBtn.Parent = rowFrame
@@ -1657,12 +1755,12 @@ local function addInviteRow(defaultText)
 
     -- ปุ่มเครื่องหมายบวกสีฟ้า (+) เพิ่มคนถัดไปได้ไม่จำกัด
     local addPlusBtn = Instance.new("TextButton")
-    addPlusBtn.Size = UDim2.fromOffset(30, 30)
-    addPlusBtn.Position = UDim2.new(1, -64, 0.5, -15)
+    addPlusBtn.Size = UDim2.fromOffset(26, 26)
+    addPlusBtn.Position = UDim2.new(1, -55, 0.5, -13)
     addPlusBtn.BackgroundColor3 = Color3.fromRGB(37, 99, 235)
     addPlusBtn.BorderSizePixel = 0
     addPlusBtn.Font = Enum.Font.GothamBold
-    addPlusBtn.TextSize = 16
+    addPlusBtn.TextSize = 15
     addPlusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     addPlusBtn.Text = "+"
     addPlusBtn.Parent = rowFrame
@@ -1671,10 +1769,10 @@ local function addInviteRow(defaultText)
     plusCorner.CornerRadius = UDim.new(0, 6)
     plusCorner.Parent = addPlusBtn
 
-    -- ปุ่มลบแถวเล็กๆ
+    -- ปุ่มลบแถว
     local removeBtn = Instance.new("TextButton")
-    removeBtn.Size = UDim2.fromOffset(26, 30)
-    removeBtn.Position = UDim2.new(1, -30, 0.5, -15)
+    removeBtn.Size = UDim2.fromOffset(24, 26)
+    removeBtn.Position = UDim2.new(1, -26, 0.5, -13)
     removeBtn.BackgroundColor3 = Color3.fromRGB(51, 65, 85)
     removeBtn.BorderSizePixel = 0
     removeBtn.Font = Enum.Font.GothamBold
@@ -1705,7 +1803,7 @@ local function addInviteRow(defaultText)
         updatePulledCounter()
     end)
 
-    pullBtn.MouseButton1Click:Connect(function()
+    pullBtn.Activated:Connect(function()
         if rowEntry.status == "loading" then
             return
         end
@@ -1731,11 +1829,11 @@ local function addInviteRow(defaultText)
         end)
     end)
 
-    addPlusBtn.MouseButton1Click:Connect(function()
+    addPlusBtn.Activated:Connect(function()
         addInviteRow("")
     end)
 
-    removeBtn.MouseButton1Click:Connect(function()
+    removeBtn.Activated:Connect(function()
         if #inviteRows <= 1 then
             nameBox.Text = ""
             rowEntry.pulledData = nil
@@ -1765,7 +1863,7 @@ else
     addInviteRow("")
 end
 
--- ปุ่มรันทันที & ปุ่มหยุด
+-- ปุ่มรันทันที & ปุ่มหยุดงาน
 local function updateRunStatusVisual()
     if isRunning then
         runBtn.Text = "กำลังทำงาน..."
@@ -1782,7 +1880,7 @@ local function updateRunStatusVisual()
     end
 end
 
-runBtn.MouseButton1Click:Connect(function()
+runBtn.Activated:Connect(function()
     if isRunning then
         sessionToken = sessionToken + 1
         clearFestivalScene()
@@ -1798,56 +1896,98 @@ runBtn.MouseButton1Click:Connect(function()
     startFestivalShow(sessionToken)
 end)
 
-stopBtn.MouseButton1Click:Connect(function()
+stopBtn.Activated:Connect(function()
     isRunning = false
     sessionToken = sessionToken + 1
     clearFestivalScene()
     updateRunStatusVisual()
 end)
 
-closeMenuBtn.MouseButton1Click:Connect(function()
+closeMenuBtn.Activated:Connect(function()
     setMenuVisibleAnimated(false)
 end)
 
--- ลากปุ่มเปิด-ปิดเมนูได้ทั้งเมาส์และทัชสกรีน
-local dragging = false
-local dragStart = nil
-local startPos = nil
-local movedDistance = 0
+-- 1) ลากย้ายตำแหน่งเมนูหลักผ่าน headerBar (ทั้งเมาส์และทัชสกรีนมือถือ)
+local menuDragging = false
+local menuDragInput = nil
+local menuDragStart = nil
+local menuStartPos = nil
+
+headerBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        -- ไม่จับลากถ้ากดตรงปุ่มปิด ×
+        local cPos = closeMenuBtn.AbsolutePosition
+        local cSize = closeMenuBtn.AbsoluteSize
+        if input.Position.X >= cPos.X and input.Position.X <= cPos.X + cSize.X
+            and input.Position.Y >= cPos.Y and input.Position.Y <= cPos.Y + cSize.Y then
+            return
+        end
+        menuDragging = true
+        menuDragInput = input
+        menuDragStart = input.Position
+        menuStartPos = menuFrame.Position
+    end
+end)
+
+-- 2) ลากปุ่มลอยเปิด-ปิดเมนู & กดสลับหุบ-กางได้แม่นยำบนมือถือ
+local toggleDragging = false
+local toggleDragInput = nil
+local toggleDragStart = nil
+local toggleStartPos = nil
+local toggleMovedDist = 0
 
 menuToggleBtn.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = menuToggleBtn.Position
-        movedDistance = 0
+        toggleDragging = true
+        toggleDragInput = input
+        toggleDragStart = input.Position
+        toggleStartPos = menuToggleBtn.Position
+        toggleMovedDist = 0
     end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        local delta = input.Position - dragStart
-        movedDistance = delta.Magnitude
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+    if menuDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input == menuDragInput) then
+        local delta = input.Position - menuDragStart
+        menuFrame.Position = UDim2.new(
+            menuStartPos.X.Scale,
+            menuStartPos.X.Offset + delta.X,
+            menuStartPos.Y.Scale,
+            menuStartPos.Y.Offset + delta.Y
+        )
+    end
+    if toggleDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input == toggleDragInput) then
+        local delta = input.Position - toggleDragStart
+        toggleMovedDist = delta.Magnitude
         menuToggleBtn.Position = UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
+            toggleStartPos.X.Scale,
+            toggleStartPos.X.Offset + delta.X,
+            toggleStartPos.Y.Scale,
+            toggleStartPos.Y.Offset + delta.Y
         )
     end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        if dragging then
-            dragging = false
-            if movedDistance < 6 then
-                setMenuVisibleAnimated(not isMenuOpen)
-            end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+    if menuDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input == menuDragInput) then
+        menuDragging = false
+        menuDragInput = nil
+    end
+    if toggleDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input == toggleDragInput) then
+        toggleDragging = false
+        toggleDragInput = nil
+        if toggleMovedDist < 14 then
+            setMenuVisibleAnimated(not isMenuOpen)
         end
     end
 end)
 
--- เปิดเมนูด้วยอนิเมชั่นทันทีตอนรันสคริปต์
+-- เปิดเมนูขนาดพกพาด้วยอนิเมชั่นทันทีตอนรันสคริปต์
 setMenuVisibleAnimated(true)
 updateRunStatusVisual()
