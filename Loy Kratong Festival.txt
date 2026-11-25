@@ -1,0 +1,672 @@
+--[[
+    Loy Krathong Client-Side Illusion Script
+    ทำงานเฉพาะฝั่ง Client (เห็นคนเดียวในหน้าจอเรา ไม่กระทบเซิร์ฟเวอร์)
+    1. ปุ่มลอยขนาดเล็ก ลากย้ายได้ กดเปิด-ปิดได้ทันที
+    2. ช่วงแรกตายรัวๆ แบบตายจริงในภาพลวงตา พร้อมเกิดใหม่และรีเซ็ตเลือด
+    3. ช่วงวาปตั้งแถวข้างตัวเรา ทุกคนเกิดใหม่เลือดเต็ม 100% และถือกระทงเรียงกัน
+]]
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- การตั้งค่าจากหน้าเว็บ (ปรับแก้ตรงนี้ได้)
+local CONFIG = {
+    DeathBurstCount = 5,
+    DeathIntervalSec = 0.35,
+    LineupHoldSec = 5,
+    LineupSpacing = 4.5,
+    SideOffset = 6.5,
+    MaxPerRow = 8,
+    GiveSelfKrathong = true,
+    HideRealPlayers = true,
+    FollowPlayerInLineup = true,
+    FloatKrathongEffect = true,
+    SoloFallbackClones = 5,
+    LoopCycle = true,
+    ButtonSizePx = 54,
+}
+
+-- ลบ UI และโฟลเดอร์ภาพลวงตาเดิมหากเคยรันซ้ำ
+local GUI_NAME = "LoyKrathongIllusion_ToggleGui"
+local FOLDER_NAME = "__LoyKrathongIllusion_Client"
+
+local function getGuiParent()
+    if type(gethui) == "function" then
+        local ok, uiRoot = pcall(gethui)
+        if ok and uiRoot then
+            return uiRoot
+        end
+    end
+    local okCore, coreGui = pcall(function()
+        return game:GetService("CoreGui")
+    end)
+    if okCore and coreGui then
+        return coreGui
+    end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local guiParent = getGuiParent()
+local oldGui = guiParent:FindFirstChild(GUI_NAME)
+if oldGui then
+    oldGui:Destroy()
+end
+
+local oldFolder = Workspace:FindFirstChild(FOLDER_NAME)
+if oldFolder then
+    oldFolder:Destroy()
+end
+
+-- สถานะหลักของระบบ
+local isEnabled = false
+local sessionToken = 0
+local illusionFolder = nil
+local hideConnection = nil
+local savedDisplayTypes = {}
+local activeSelfKrathong = nil
+
+-- สร้างโฟลเดอร์เก็บโมเดลจำลองฝั่ง Client
+local function ensureIllusionFolder()
+    if illusionFolder and illusionFolder.Parent then
+        return illusionFolder
+    end
+    local folder = Instance.new("Folder")
+    folder.Name = FOLDER_NAME
+    folder.Parent = Workspace
+    illusionFolder = folder
+    return folder
+end
+
+-- ซ่อน / คืนค่าตัวละครจริงของผู้เล่นอื่นเฉพาะมุมมองของเรา
+local function setRealPlayersHidden(hidden)
+    if hideConnection then
+        hideConnection:Disconnect()
+        hideConnection = nil
+    end
+
+    if not hidden then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                for _, desc in ipairs(player.Character:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        desc.LocalTransparencyModifier = 0
+                    end
+                end
+                local hum = player.Character:FindFirstChildOfClass("Humanoid")
+                if hum and savedDisplayTypes[hum] then
+                    hum.DisplayDistanceType = savedDisplayTypes[hum]
+                end
+            end
+        end
+        table.clear(savedDisplayTypes)
+        return
+    end
+
+    if not CONFIG.HideRealPlayers then
+        return
+    end
+
+    hideConnection = RunService.RenderStepped:Connect(function()
+        if not isEnabled then
+            return
+        end
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                for _, desc in ipairs(player.Character:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        desc.LocalTransparencyModifier = 1
+                    end
+                end
+                local hum = player.Character:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    if not savedDisplayTypes[hum] then
+                        savedDisplayTypes[hum] = hum.DisplayDistanceType
+                    end
+                    hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+                end
+            end
+        end
+    end)
+end
+
+-- สร้างไอเทมกระทง (Tool) พร้อมฐานใบตอง กลีบดอกไม้ ธูป และแสงเทียน
+local function createKrathongTool(customName)
+    local tool = Instance.new("Tool")
+    tool.Name = customName or "Krathong"
+    tool.RequiresHandle = true
+    tool.CanBeDropped = false
+    tool.Grip = CFrame.new(0, -0.35, -0.55) * CFrame.Angles(math.rad(-12), 0, 0)
+
+    local handle = Instance.new("Part")
+    handle.Name = "Handle"
+    handle.Size = Vector3.new(1.5, 0.42, 1.5)
+    handle.Color = Color3.fromRGB(46, 125, 50)
+    handle.Material = Enum.Material.SmoothPlastic
+    handle.CanCollide = false
+    handle.Massless = true
+    handle.Parent = tool
+
+    local baseMesh = Instance.new("CylinderMesh")
+    baseMesh.Scale = Vector3.new(1, 0.85, 1)
+    baseMesh.Parent = handle
+
+    local function weldPart(part, offsetCFrame)
+        part.CanCollide = false
+        part.Anchored = false
+        part.Massless = true
+        part.CFrame = handle.CFrame * offsetCFrame
+        part.Parent = tool
+
+        local weld = Instance.new("WeldConstraint")
+        weld.Part0 = handle
+        weld.Part1 = part
+        weld.Parent = part
+    end
+
+    -- กลีบใบตองรอบกระทง 8 กลีบ
+    local petalCount = 8
+    for i = 1, petalCount do
+        local angle = (i - 1) * ((math.pi * 2) / petalCount)
+        local petal = Instance.new("Part")
+        petal.Name = "LeafPetal_" .. i
+        petal.Size = Vector3.new(0.45, 0.45, 0.16)
+        petal.Color = (i % 2 == 0) and Color3.fromRGB(76, 175, 80) or Color3.fromRGB(56, 142, 60)
+        petal.Material = Enum.Material.SmoothPlastic
+        local offset = CFrame.Angles(0, angle, 0)
+            * CFrame.new(0, 0.16, 0.72)
+            * CFrame.Angles(math.rad(-25), 0, 0)
+        weldPart(petal, offset)
+    end
+
+    -- ดอกบัวตกแต่งตรงกลาง
+    local lotus = Instance.new("Part")
+    lotus.Name = "LotusCenter"
+    lotus.Shape = Enum.PartType.Ball
+    lotus.Size = Vector3.new(0.68, 0.42, 0.68)
+    lotus.Color = Color3.fromRGB(244, 114, 182)
+    lotus.Material = Enum.Material.SmoothPlastic
+    weldPart(lotus, CFrame.new(0, 0.25, 0))
+
+    -- เทียนสีเหลืองตรงกลางพร้อมแสงเทียนและเปลวไฟ
+    local candle = Instance.new("Part")
+    candle.Name = "Candle"
+    candle.Size = Vector3.new(0.14, 0.55, 0.14)
+    candle.Color = Color3.fromRGB(250, 204, 21)
+    candle.Material = Enum.Material.SmoothPlastic
+    weldPart(candle, CFrame.new(0, 0.52, 0))
+
+    local flameTip = Instance.new("Part")
+    flameTip.Name = "FlameTip"
+    flameTip.Shape = Enum.PartType.Ball
+    flameTip.Size = Vector3.new(0.16, 0.22, 0.16)
+    flameTip.Color = Color3.fromRGB(255, 170, 40)
+    flameTip.Material = Enum.Material.Neon
+    weldPart(flameTip, CFrame.new(0, 0.85, 0))
+
+    local light = Instance.new("PointLight")
+    light.Color = Color3.fromRGB(255, 185, 75)
+    light.Range = 9
+    light.Brightness = 1.8
+    light.Parent = flameTip
+
+    local fire = Instance.new("Fire")
+    fire.Size = 1.4
+    fire.Heat = 2.5
+    fire.Color = Color3.fromRGB(255, 195, 65)
+    fire.SecondaryColor = Color3.fromRGB(255, 95, 25)
+    fire.Parent = flameTip
+
+    -- ธูป 3 ดอก
+    for i = -1, 1 do
+        local incense = Instance.new("Part")
+        incense.Name = "Incense_" .. (i + 2)
+        incense.Size = Vector3.new(0.05, 0.65, 0.05)
+        incense.Color = Color3.fromRGB(161, 98, 7)
+        incense.Material = Enum.Material.Wood
+        weldPart(incense, CFrame.new(i * 0.1, 0.5, -0.14) * CFrame.Angles(math.rad(-10), 0, math.rad(i * 6)))
+    end
+
+    return tool
+end
+
+-- ลบกระทงจำลองของตัวเรา
+local function removeSelfKrathong()
+    if activeSelfKrathong then
+        pcall(function()
+            activeSelfKrathong:Destroy()
+        end)
+        activeSelfKrathong = nil
+    end
+end
+
+-- เสกกระทงให้ตัวเราถือด้วย
+local function giveSelfKrathongIfEnabled()
+    removeSelfKrathong()
+    if not CONFIG.GiveSelfKrathong then
+        return
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if char and hum and backpack then
+        local tool = createKrathongTool("Krathong_Self")
+        tool.Parent = backpack
+        activeSelfKrathong = tool
+        pcall(function()
+            hum:EquipTool(tool)
+        end)
+    end
+end
+
+-- สร้างโคลนตัวละครฝั่ง Client พร้อมรีเซ็ตเลือดเต็ม 100%
+local function spawnFreshClone(sourcePlayer, cloneLabel, targetCFrame, anchoredRoot)
+    local sourceChar = sourcePlayer and sourcePlayer.Character
+    if not sourceChar then
+        return nil
+    end
+
+    local prevArchivable = sourceChar.Archivable
+    sourceChar.Archivable = true
+    local clone = sourceChar:Clone()
+    sourceChar.Archivable = prevArchivable
+    if not clone then
+        return nil
+    end
+
+    clone.Name = cloneLabel or (sourcePlayer.Name .. "_Illusion")
+
+    for _, desc in ipairs(clone:GetDescendants()) do
+        if desc:IsA("Script") or desc:IsA("LocalScript") then
+            desc:Destroy()
+        elseif desc:IsA("Tool") then
+            desc:Destroy()
+        elseif desc:IsA("BasePart") then
+            desc.LocalTransparencyModifier = 0
+            desc.CanCollide = false
+            desc.Anchored = false
+        end
+    end
+
+    local hum = clone:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.DisplayName = sourcePlayer.DisplayName
+        hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
+        hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOn
+        hum.MaxHealth = 100
+        hum.Health = 100 -- รีเซ็ตเลือดเต็ม 100% ตอนเกิดใหม่
+        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+    end
+
+    local folder = ensureIllusionFolder()
+    clone.Parent = folder
+
+    local root = clone:FindFirstChild("HumanoidRootPart") or clone.PrimaryPart
+    if root and targetCFrame then
+        clone:PivotTo(targetCFrame)
+        if anchoredRoot then
+            root.Anchored = true
+        end
+    end
+
+    return clone
+end
+
+-- รวบรวมรายชื่อผู้เล่นเป้าหมายในแมพ (รวมโคลนสำรองกรณีอยู่คนเดียว)
+local function gatherTargetSources()
+    local targets = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            table.insert(targets, {
+                player = player,
+                label = player.DisplayName,
+            })
+        end
+    end
+
+    if #targets == 0 and CONFIG.SoloFallbackClones > 0 and LocalPlayer.Character then
+        for i = 1, CONFIG.SoloFallbackClones do
+            table.insert(targets, {
+                player = LocalPlayer,
+                label = LocalPlayer.DisplayName .. " #" .. i,
+            })
+        end
+    end
+
+    return targets
+end
+
+-- สั่งให้โคลนตายแบบสมจริงในภาพลวงตา (เลือด 0 + ข้อต่อหลุด)
+local function killCloneIllusion(clone)
+    if not clone or not clone.Parent then
+        return
+    end
+    local root = clone:FindFirstChild("HumanoidRootPart")
+    if root then
+        root.Anchored = false
+    end
+    local hum = clone:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.Health = 0
+        pcall(function()
+            hum:ChangeState(Enum.HumanoidStateType.Dead)
+        end)
+    end
+    pcall(function()
+        clone:BreakJoints()
+    end)
+    for _, part in ipairs(clone:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = true
+            part.AssemblyLinearVelocity = Vector3.new(
+                math.random(-10, 10),
+                math.random(4, 12),
+                math.random(-10, 10)
+            )
+        end
+    end
+end
+
+-- คำนวณตำแหน่งเรียงแถวข้างตัวเรา
+local function getLineupCFrame(anchorCFrame, index)
+    local zeroIdx = index - 1
+    local col = zeroIdx % CONFIG.MaxPerRow
+    local row = math.floor(zeroIdx / CONFIG.MaxPerRow)
+
+    local rightOffset = CONFIG.SideOffset + (row * CONFIG.LineupSpacing)
+    local forwardOffset = (col - (math.min(CONFIG.MaxPerRow, 4) * 0.35)) * CONFIG.LineupSpacing
+
+    return anchorCFrame * CFrame.new(rightOffset, 0, -forwardOffset)
+end
+
+-- ล้างภาพลวงตาทั้งหมดเมื่อกดปิด
+local function clearAllIllusions()
+    if illusionFolder then
+        illusionFolder:Destroy()
+        illusionFolder = nil
+    end
+    removeSelfKrathong()
+    setRealPlayersHidden(false)
+end
+
+-- ติดตั้งไอเทมกระทงใส่มือตัวละครโคลน (รองรับทั้ง R15 และ R6)
+local function equipKrathongOnClone(clone, krathong)
+    local hum = clone:FindFirstChildOfClass("Humanoid")
+    krathong.Parent = clone
+    if hum then
+        pcall(function()
+            hum:EquipTool(krathong)
+        end)
+    end
+
+    local hand = clone:FindFirstChild("RightHand") or clone:FindFirstChild("Right Arm")
+    local handle = krathong:FindFirstChild("Handle")
+    if hand and handle and not hand:FindFirstChild("RightGrip") then
+        handle.CFrame = hand.CFrame * CFrame.new(0, -0.45, -0.75)
+        local gripWeld = Instance.new("WeldConstraint")
+        gripWeld.Name = "ClientKrathongGrip"
+        gripWeld.Part0 = hand
+        gripWeld.Part1 = handle
+        gripWeld.Parent = handle
+    end
+end
+
+-- เอฟเฟกต์ปล่อยกระทงลอยจำลองช่วงท้ายแถว
+local function spawnFloatingKrathongsFromLineup(clones)
+    if not CONFIG.FloatKrathongEffect then
+        return
+    end
+    local folder = ensureIllusionFolder()
+    for _, clone in ipairs(clones) do
+        local root = clone and clone:FindFirstChild("HumanoidRootPart")
+        if root then
+            local floatModel = Instance.new("Model")
+            floatModel.Name = "FloatingKrathong"
+            local krathongTool = createKrathongTool("FloatBase")
+            local handle = krathongTool:FindFirstChild("Handle")
+            if handle then
+                for _, desc in ipairs(krathongTool:GetDescendants()) do
+                    if desc:IsA("WeldConstraint") then
+                        desc:Destroy()
+                    end
+                end
+                for _, child in ipairs(krathongTool:GetChildren()) do
+                    if child:IsA("BasePart") then
+                        child.Anchored = true
+                        child.CanCollide = false
+                        child.Parent = floatModel
+                    end
+                end
+                floatModel.PrimaryPart = handle
+                floatModel:PivotTo(root.CFrame * CFrame.new(0, -1.6, -2.2))
+                floatModel.Parent = folder
+
+                local targetCf = handle.CFrame * CFrame.new(0, 0.35, -7.5)
+                for _, part in ipairs(floatModel:GetChildren()) do
+                    if part:IsA("BasePart") then
+                        local rel = handle.CFrame:ToObjectSpace(part.CFrame)
+                        local tween = TweenService:Create(
+                            part,
+                            TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+                            { CFrame = targetCf * rel }
+                        )
+                        tween:Play()
+                    end
+                end
+            end
+            krathongTool:Destroy()
+        end
+    end
+end
+
+-- ลูปหลัก: ช่วงแรกตายรัวๆ เกิดใหม่รีเซ็ตเลือด -> ช่วงวาปตั้งแถวข้างตัวเรา เลือดเต็ม ถือกระทงเรียงกัน
+local function startIllusionLoop(currentToken)
+    ensureIllusionFolder()
+    setRealPlayersHidden(true)
+
+    task.spawn(function()
+        while isEnabled and sessionToken == currentToken do
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            if not myRoot then
+                task.wait(0.25)
+                continue
+            end
+
+            -- =========================================================
+            -- เฟส 1: ตายรัวๆ แบบตายจริงในภาพลวงตา + เกิดใหม่รีเซ็ตเลือด
+            -- =========================================================
+            for burst = 1, CONFIG.DeathBurstCount do
+                if not isEnabled or sessionToken ~= currentToken then
+                    return
+                end
+
+                local folder = ensureIllusionFolder()
+                folder:ClearAllChildren()
+
+                local targets = gatherTargetSources()
+                local burstClones = {}
+
+                for idx, entry in ipairs(targets) do
+                    local angle = (idx / math.max(#targets, 1)) * math.pi * 2
+                    local spawnCf = myRoot.CFrame * CFrame.new(
+                        math.cos(angle) * 8,
+                        0,
+                        math.sin(angle) * 8
+                    )
+                    -- เกิดใหม่ด้วยเลือดเต็ม 100% ก่อนตายในรอบนี้
+                    local clone = spawnFreshClone(entry.player, entry.label, spawnCf, false)
+                    if clone then
+                        table.insert(burstClones, clone)
+                    end
+                end
+
+                -- หน่วงสั้นๆ ให้เห็นว่าเกิดใหม่และเลือดรีเซ็ตเต็มก่อนตายรัว
+                task.wait(0.08)
+                if not isEnabled or sessionToken ~= currentToken then
+                    return
+                end
+
+                for _, clone in ipairs(burstClones) do
+                    killCloneIllusion(clone)
+                end
+
+                task.wait(CONFIG.DeathIntervalSec)
+            end
+
+            if not isEnabled or sessionToken ~= currentToken then
+                return
+            end
+
+            -- =========================================================
+            -- เฟส 2: เกิดใหม่เลือดเต็ม + วาปตั้งแถวข้างตัวเรา + ถือกระทงเรียงกัน
+            -- =========================================================
+            local folder = ensureIllusionFolder()
+            folder:ClearAllChildren()
+
+            local targets = gatherTargetSources()
+            local lineupClones = {}
+            local anchorCf = myRoot.CFrame
+
+            for idx, entry in ipairs(targets) do
+                local lineCf = getLineupCFrame(anchorCf, idx)
+                local clone = spawnFreshClone(entry.player, entry.label, lineCf, true)
+                if clone then
+                    local hum = clone:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        hum.MaxHealth = 100
+                        hum.Health = 100 -- เลือดเต็ม 100% ตอนถือกระทงจะยังไม่ตาย
+                        local krathong = createKrathongTool("Krathong")
+                        equipKrathongOnClone(clone, krathong)
+                    end
+                    table.insert(lineupClones, clone)
+                end
+            end
+
+            giveSelfKrathongIfEnabled()
+
+            local holdElapsed = 0
+            local floated = false
+            while isEnabled and sessionToken == currentToken and holdElapsed < CONFIG.LineupHoldSec do
+                local dt = RunService.Heartbeat:Wait()
+                holdElapsed = holdElapsed + dt
+
+                if CONFIG.FollowPlayerInLineup then
+                    local currentChar = LocalPlayer.Character
+                    local currentRoot = currentChar and currentChar:FindFirstChild("HumanoidRootPart")
+                    if currentRoot then
+                        for idx, clone in ipairs(lineupClones) do
+                            if clone and clone.Parent then
+                                clone:PivotTo(getLineupCFrame(currentRoot.CFrame, idx))
+                            end
+                        end
+                    end
+                end
+
+                if not floated and holdElapsed >= (CONFIG.LineupHoldSec - 1.2) then
+                    floated = true
+                    spawnFloatingKrathongsFromLineup(lineupClones)
+                end
+            end
+
+            if not CONFIG.LoopCycle then
+                break
+            end
+        end
+    end)
+end
+
+-- =========================================================
+-- สร้างปุ่มลอยขนาดเล็ก (Draggable Floating Toggle Button)
+-- =========================================================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = GUI_NAME
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = guiParent
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Name = "KrathongToggleButton"
+toggleBtn.Size = UDim2.fromOffset(CONFIG.ButtonSizePx + 74, CONFIG.ButtonSizePx)
+toggleBtn.Position = UDim2.new(0.03, 0, 0.35, 0)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
+toggleBtn.BorderSizePixel = 0
+toggleBtn.AutoButtonColor = false
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 13
+toggleBtn.TextColor3 = Color3.fromRGB(248, 250, 252)
+toggleBtn.Text = "กระทง: ปิด"
+toggleBtn.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 14)
+corner.Parent = toggleBtn
+
+local stroke = Instance.new("UIStroke")
+stroke.Thickness = 1.6
+stroke.Color = Color3.fromRGB(71, 85, 105)
+stroke.Parent = toggleBtn
+
+local function updateButtonVisual()
+    if isEnabled then
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 83, 9)
+        stroke.Color = Color3.fromRGB(251, 191, 36)
+        toggleBtn.Text = "กระทง: เปิด"
+    else
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(17, 24, 39)
+        stroke.Color = Color3.fromRGB(71, 85, 105)
+        toggleBtn.Text = "กระทง: ปิด"
+    end
+end
+
+-- ระบบลากปุ่มลอย (รองรับทั้งเมาส์และทัชสกรีน)
+local dragging = false
+local dragStart = nil
+local startPos = nil
+local movedDistance = 0
+
+toggleBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = toggleBtn.Position
+        movedDistance = 0
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        movedDistance = delta.Magnitude
+        toggleBtn.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if dragging then
+            dragging = false
+            if movedDistance < 6 then
+                isEnabled = not isEnabled
+                sessionToken = sessionToken + 1
+                updateButtonVisual()
+                if isEnabled then
+                    startIllusionLoop(sessionToken)
+                else
+                    clearAllIllusions()
+                end
+            end
+        end
+    end
+end)
+
+updateButtonVisual()
